@@ -37,6 +37,16 @@ export default function PositionsCard() {
     refreshPrices,
   } =
     usePortfolioState();
+  function handleUpdateMoneyMarketBalance(p: Position, balance: number) {
+    const sanitized = Number.isFinite(balance) && balance >= 0 ? balance : 0;
+    updatePosition({
+      ...p,
+      // Encode balance style: qty=1, price=1, value = costBasisPerUnit
+      quantity: 1,
+      currentPrice: 1,
+      costBasisPerUnit: sanitized,
+    });
+  }
   const [form, setForm] = useState<Omit<Position, "id" | "currency" | "createdAt">>({
     ticker: "",
     name: "",
@@ -365,14 +375,23 @@ export default function PositionsCard() {
                           {typeof p.currentPrice === "number" ? `$${p.currentPrice.toFixed(2)}` : "—"}
                         </td>
                         <td className="px-2 py-2 text-right">
-                          <div className="inline-flex items-center gap-1">
-                            ${value.toFixed(2)}
-                            {isMM && (
-                              <Tooltip text="Money market is treated at $1 NAV. For CASH, value equals balance.">
+                          {isMM ? (
+                            <div className="inline-flex items-center gap-2">
+                              <Input
+                                type="number"
+                                defaultValue={value.toFixed(2)}
+                                onBlur={(e) => handleUpdateMoneyMarketBalance(p, Number(e.currentTarget.value))}
+                                className="h-8 w-28 text-right"
+                              />
+                              <Tooltip text="Money market/CASH uses $1 NAV. Edit to set current balance.">
                                 <span className="text-gray-400 cursor-help">?</span>
                               </Tooltip>
-                            )}
-                          </div>
+                            </div>
+                          ) : (
+                            <div className="inline-flex items-center gap-1">
+                              ${value.toFixed(2)}
+                            </div>
+                          )}
                         </td>
                         <td className={`px-2 py-2 text-right ${plDollar >= 0 ? "text-emerald-600" : "text-red-600"}`}>
                           {plDollar >= 0 ? "+" : ""}${plDollar.toFixed(2)}
