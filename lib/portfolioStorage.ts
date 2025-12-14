@@ -50,19 +50,23 @@ export function valueForPosition(p: Position): number {
     return Number.isFinite(bal) ? bal : 0;
   }
 
-  // Money market funds (e.g., SPAXX) or other MM-like: support two styles
+  // Money market funds (e.g., SPAXX) or other MM-like: support both styles
   if (isMM) {
     const q = Number(p.quantity) || 0;
-    const hasPrice = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice as number) && (p as any).currentPrice !== undefined;
-    if (hasPrice) {
-      return q * (p.currentPrice as number);
+    const price =
+      typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? (p.currentPrice as number) : undefined;
+    const hasBalance =
+      typeof p.costBasisPerUnit === "number" && Number.isFinite(p.costBasisPerUnit) && (p.costBasisPerUnit as number) > 0;
+    // Style 1: single-share with NAV≈1 and balance stored in costBasisPerUnit
+    if (q === 1 && hasBalance && (price === undefined || Math.abs(price - 1) < 1e-9)) {
+      return Number(p.costBasisPerUnit);
     }
-    // If quantity encodes balance and NAV ~1 (e.g., qty = dollars, currentPrice 1)
-    if (q > 0 && (!p.currentPrice || Math.abs((p.currentPrice as number) - 1) < 1e-9)) {
+    // Style 2: balance encoded in quantity with NAV≈1
+    if (price === undefined || Math.abs(price - 1) < 1e-9) {
       return q;
     }
-    // Fallback to cost basis total
-    return (Number((p as any).costBasisPerUnit as any) || 0) * q;
+    // Non-1 price provided → use q * price
+    return q * price;
   }
 
   const unitPrice = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? (p.currentPrice as number) : (p.costBasisPerUnit ?? 0);
