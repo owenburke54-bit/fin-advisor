@@ -37,6 +37,7 @@ export default function PositionsCard() {
     refreshPrices,
   } =
     usePortfolioState();
+  const [mmEdits, setMmEdits] = useState<Record<string, number>>({});
   function handleUpdateMoneyMarketBalance(p: Position, balance: number) {
     const sanitized = Number.isFinite(balance) && balance >= 0 ? balance : 0;
     updatePosition({
@@ -45,6 +46,11 @@ export default function PositionsCard() {
       quantity: 1,
       currentPrice: 1,
       costBasisPerUnit: sanitized,
+    });
+    setMmEdits((prev) => {
+      const next = { ...prev };
+      delete next[p.id];
+      return next;
     });
   }
   const [form, setForm] = useState<Omit<Position, "id" | "currency" | "createdAt">>({
@@ -376,15 +382,34 @@ export default function PositionsCard() {
                         </td>
                         <td className="px-2 py-2 text-right">
                           {isMM ? (
-                            <div className="inline-flex items-center gap-2">
+                            <div className="flex items-center justify-end gap-2">
                               <Input
                                 type="number"
-                                defaultValue={value.toFixed(2)}
-                                onBlur={(e) => handleUpdateMoneyMarketBalance(p, Number(e.currentTarget.value))}
-                                className="h-8 w-28 text-right"
+                                className="h-8 w-24 text-right"
+                                value={String(
+                                  mmEdits[p.id] !== undefined ? mmEdits[p.id] : Number(value.toFixed(2)),
+                                )}
+                                onChange={(e) =>
+                                  setMmEdits((prev) => ({ ...prev, [p.id]: Number(e.target.value) }))
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === \"Enter\") {
+                                    const v = Number(mmEdits[p.id] ?? value);
+                                    handleUpdateMoneyMarketBalance(p, v);
+                                  }
+                                }}
                               />
-                              <Tooltip text="Money market/CASH uses $1 NAV. Edit to set current balance.">
-                                <span className="text-gray-400 cursor-help">?</span>
+                              <Button
+                                size=\"sm\"
+                                onClick={() => {
+                                  const v = Number(mmEdits[p.id] ?? value);
+                                  handleUpdateMoneyMarketBalance(p, v);
+                                }}
+                              >
+                                Save
+                              </Button>
+                              <Tooltip text=\"Money market/CASH uses $1 NAV. Value equals current balance.\">
+                                <span className=\"text-gray-400 cursor-help\">?</span>
                               </Tooltip>
                             </div>
                           ) : (
