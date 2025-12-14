@@ -31,6 +31,7 @@ export interface UsePortfolio {
   addPosition: (p: Position) => void;
   updatePosition: (p: Position) => void;
   deletePosition: (id: string) => void;
+  clearPositions: () => void;
   exportJSON: () => string;
   importJSON: (json: string) => void;
   exportCSV: () => string;
@@ -78,6 +79,10 @@ export function usePortfolioState(): UsePortfolio {
 
   const deletePosition = useCallback((id: string) => {
     setState((prev) => storageDelete(prev, id));
+  }, []);
+
+  const clearPositions = useCallback(() => {
+    setState((prev) => withSnapshot({ ...prev, positions: [] }));
   }, []);
 
   const refreshPrices = useCallback(async () => {
@@ -312,6 +317,7 @@ export function usePortfolioState(): UsePortfolio {
     addPosition,
     updatePosition,
     deletePosition,
+    clearPositions,
     exportJSON,
     importJSON,
     exportCSV,

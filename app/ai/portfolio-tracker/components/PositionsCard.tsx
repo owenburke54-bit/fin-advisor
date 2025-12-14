@@ -25,7 +25,17 @@ const ASSET_CLASSES: AssetClass[] = ["Equity", "ETF", "Mutual Fund", "Crypto", "
 const ACCOUNT_TYPES: AccountType[] = ["Taxable", "Roth IRA", "Traditional IRA", "401k/403b", "HSA", "Other"];
 
 export default function PositionsCard() {
-  const { state, addPosition, updatePosition, deletePosition, exportCSV, exportJSON, importCSV, refreshPrices } =
+  const {
+    state,
+    addPosition,
+    updatePosition,
+    deletePosition,
+    clearPositions,
+    exportCSV,
+    exportJSON,
+    importCSV,
+    refreshPrices,
+  } =
     usePortfolioState();
   const [form, setForm] = useState<Omit<Position, "id" | "currency" | "createdAt">>({
     ticker: "",
@@ -278,10 +288,25 @@ export default function PositionsCard() {
             value={importText}
             onChange={(e) => setImportText(e.target.value)}
           />
-          <div className="mt-2 flex justify-end">
+          <div className="mt-2 flex justify-between">
+            <div className="text-xs text-gray-600 self-center">
+              Tip: If you import the wrong file, use “Delete all” to start fresh.
+            </div>
             <Button variant="secondary" onClick={handleImportCSV}>
               Import CSV
             </Button>
+            {hasPositions && (
+              <Button
+                variant="destructive"
+                onClick={() => {
+                  if (confirm("Delete all positions? This cannot be undone.")) {
+                    clearPositions();
+                  }
+                }}
+              >
+                Delete all
+              </Button>
+            )}
           </div>
           {importErrs.length > 0 && (
             <ul className="mt-2 list-disc pl-6 text-xs text-red-600">
