@@ -11,10 +11,14 @@ import { Badge } from "@/components/ui/Badge";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { UserProfile } from "@/lib/types";
 
+// Typed 1–5 so TS knows riskLevel is not just "number"
+const riskNumbers = [1, 2, 3, 4, 5] as const;
+type RiskNumber = (typeof riskNumbers)[number];
+
 const profileSchema = z.object({
   name: z.string().optional(),
   age: z.number().min(13, "Age must be at least 13").max(100, "Age must be under 100"),
-  riskLevel: z.number().min(1).max(5),
+  riskLevel: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]),
   investmentHorizonYears: z.number().min(1).max(70),
   portfolioStartDate: z.string().optional(), // YYYY-MM-DD
   primaryGoal: z.enum(["Retirement", "House", "Wealth Building", "Education", "Short-Term Savings", "Other"]),
@@ -22,18 +26,28 @@ const profileSchema = z.object({
   monthlyContribution: z.number().min(0).optional(),
 });
 
+function clampRisk(n: number): RiskNumber {
+  const v = Math.round(Number(n));
+  if (v <= 1) return 1;
+  if (v >= 5) return 5;
+  return v as RiskNumber;
+}
+
 export default function ProfileCard() {
   const { state, setProfile } = usePortfolioState();
+
+  // Keep existing defaults, but ensure riskLevel is valid
   const existing = state.profile ?? {
     name: "",
     age: 30,
-    riskLevel: 3,
+    riskLevel: 3 as UserProfile["riskLevel"],
     investmentHorizonYears: 20,
     portfolioStartDate: undefined,
     primaryGoal: "Wealth Building" as const,
     goalDescription: "",
     monthlyContribution: 0,
   };
+
   const [form, setForm] = useState<UserProfile>(existing);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -41,10 +55,11 @@ export default function ProfileCard() {
     const parsed = profileSchema.safeParse({
       ...form,
       age: Number(form.age),
-      riskLevel: Number(form.riskLevel),
+      riskLevel: clampRisk(Number(form.riskLevel)),
       investmentHorizonYears: Number(form.investmentHorizonYears),
       monthlyContribution: form.monthlyContribution ? Number(form.monthlyContribution) : undefined,
     });
+
     if (!parsed.success) {
       const e: Record<string, string> = {};
       for (const issue of parsed.error.issues) {
@@ -54,16 +69,21 @@ export default function ProfileCard() {
       setErrors(e);
       return;
     }
+
     setErrors({});
-    setProfile(parsed.data);
+
+    // Cast only the riskLevel field into UserProfile["riskLevel"] to satisfy your types
+    setProfile({
+      ...(parsed.data as Omit<UserProfile, "riskLevel">),
+      riskLevel: parsed.data.riskLevel as UserProfile["riskLevel"],
+    } as UserProfile);
   }
 
-  const riskLabels = ["Very Conservative", "Conservative", "Moderate", "Aggressive", "Very Aggressive"];
+  const riskLabels = ["Very Conservative", "Conservative", "Moderate", "Aggressive", "Very Aggressive"] as const;
+
   const riskSummary = (() => {
-    const idx = Math.max(1, Math.min(5, form.riskLevel)) - 1;
-    const horizon = form.investmentHorizonYears;
-    if (form.riskLevel <= 2) return `${riskLabels[idx]}, ${horizon}+ year horizon`;
-    if (form.riskLevel === 3) return `Moderate, ${horizon}+ year horizon`;
+    const idx = Math.max(1, Math.min(5, Number(form.riskLevel))) - 1;
+    const horizon = Number(form.investmentHorizonYears);
     return `${riskLabels[idx]}, ${horizon}+ year horizon`;
   })();
 
@@ -78,31 +98,31 @@ export default function ProfileCard() {
           <Badge variant="secondary">Required</Badge>
         </div>
       </CardHeader>
+
       <CardContent className="space-y-4">
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm mb-1">Name</label>
             <Input value={form.name ?? ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           </div>
+
           <div>
             <label className="block text-sm mb-1">Age</label>
-            <Input
-              type="number"
-              value={form.age}
-              onChange={(e) => setForm({ ...form, age: Number(e.target.value) })}
-            />
+            <Input type="number" value={form.age} onChange={(e) => setForm({ ...form, age: Number(e.target.value) })} />
             {errors.age && <p className="text-xs text-red-600 mt-1">{errors.age}</p>}
           </div>
+
           <div className="sm:col-span-2">
-            <label className="block text-sm mb-1">Risk level: {form.riskLevel} / 5</label>
+            <label className="block text-sm mb-1">Risk level: {Number(form.riskLevel)} / 5</label>
             <Slider
               min={1}
               max={5}
               step={1}
-              value={form.riskLevel}
-              onChange={(e) => setForm({ ...form, riskLevel: Number(e.target.value) as UserProfile["riskLevel"] })}
+              value={Number(form.riskLevel)}
+              onChange={(e) => setForm({ ...form, riskLevel: clampRisk(Number(e.target.value)) as UserProfile["riskLevel"] })}
             />
           </div>
+
           <div>
             <label className="block text-sm mb-1">Investment horizon (years)</label>
             <Input
@@ -111,6 +131,7 @@ export default function ProfileCard() {
               onChange={(e) => setForm({ ...form, investmentHorizonYears: Number(e.target.value) })}
             />
           </div>
+
           <div>
             <label className="block text-sm mb-1">Portfolio start date (optional)</label>
             <Input
@@ -124,28 +145,18 @@ export default function ProfileCard() {
               }
             />
           </div>
+
           <div>
             <label className="block text-sm mb-1">Primary goal</label>
-            <Select
-              value={form.primaryGoal}
-              onChange={(e) =>
-                setForm({ ...form, primaryGoal: e.target.value as UserProfile["primaryGoal"] })
-              }
-            >
-              {[
-                "Retirement",
-                "House",
-                "Wealth Building",
-                "Education",
-                "Short-Term Savings",
-                "Other",
-              ].map((g) => (
+            <Select value={form.primaryGoal} onChange={(e) => setForm({ ...form, primaryGoal: e.target.value as UserProfile["primaryGoal"] })}>
+              {["Retirement", "House", "Wealth Building", "Education", "Short-Term Savings", "Other"].map((g) => (
                 <option key={g} value={g}>
                   {g}
                 </option>
               ))}
             </Select>
           </div>
+
           <div className="sm:col-span-2">
             <label className="block text-sm mb-1">Monthly contribution (optional)</label>
             <Input
@@ -159,14 +170,13 @@ export default function ProfileCard() {
               }
             />
           </div>
+
           <div className="sm:col-span-2">
             <label className="block text-sm mb-1">Goal description (optional)</label>
-            <Input
-              value={form.goalDescription ?? ""}
-              onChange={(e) => setForm({ ...form, goalDescription: e.target.value })}
-            />
+            <Input value={form.goalDescription ?? ""} onChange={(e) => setForm({ ...form, goalDescription: e.target.value })} />
           </div>
         </div>
+
         <div className="flex items-center justify-between gap-4">
           <p className="text-sm text-gray-600">Risk Profile Summary: {riskSummary}</p>
           <Button onClick={handleSave}>Save Profile</Button>
@@ -175,4 +185,3 @@ export default function ProfileCard() {
     </Card>
   );
 }
-

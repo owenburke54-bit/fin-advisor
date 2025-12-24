@@ -28,12 +28,23 @@ export default function PortfolioTrackerPage() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left column: Inputs */}
         <div className="space-y-6">
-          <Suspense fallback={<Card><CardContent>Loading profile…</CardContent></Card>}>
-            {/* @ts-expect-error Async Server Component boundary */}
+          <Suspense
+            fallback={
+              <Card>
+                <CardContent>Loading profile…</CardContent>
+              </Card>
+            }
+          >
             <ProfileCard />
           </Suspense>
-          <Suspense fallback={<Card><CardContent>Loading positions…</CardContent></Card>}>
-            {/* @ts-expect-error Async Server Component boundary */}
+
+          <Suspense
+            fallback={
+              <Card>
+                <CardContent>Loading positions…</CardContent>
+              </Card>
+            }
+          >
             <PositionsCard />
           </Suspense>
         </div>
@@ -58,4 +69,3 @@ export default function PortfolioTrackerPage() {
     </main>
   );
 }
-
