@@ -7,7 +7,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/Dialog";
-import { Tooltip } from "@/components/ui/Tooltip";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { AccountType, AssetClass, Position } from "@/lib/types";
 import { valueForPosition } from "@/lib/portfolioStorage";
@@ -24,38 +23,13 @@ const positionSchema = z.object({
 const ASSET_CLASSES: AssetClass[] = ["Equity", "ETF", "Mutual Fund", "Crypto", "Bond", "Money Market", "Cash", "Other"];
 const ACCOUNT_TYPES: AccountType[] = ["Taxable", "Roth IRA", "Traditional IRA", "401k/403b", "HSA", "Other"];
 
+function isCashLike(ac: AssetClass) {
+  return ac === "Money Market" || ac === "Cash";
+}
+
 export default function PositionsCard() {
-  const {
-    state,
-    addPosition,
-    updatePosition,
-    deletePosition,
-    clearPositions,
-    exportCSV,
-    exportJSON,
-    importCSV,
-    refreshPrices,
-  } = usePortfolioState();
-
-  const [mmEdits, setMmEdits] = useState<Record<string, number>>({});
-
-  function handleUpdateMoneyMarketBalance(p: Position, balance: number) {
-    const sanitized = Number.isFinite(balance) && balance >= 0 ? balance : 0;
-
-    updatePosition({
-      ...p,
-      // Encode balance style: qty=1, price=1, value = costBasisPerUnit
-      quantity: 1,
-      currentPrice: 1,
-      costBasisPerUnit: sanitized,
-    });
-
-    setMmEdits((prev) => {
-      const next = { ...prev };
-      delete next[p.id];
-      return next;
-    });
-  }
+  const { state, addPosition, updatePosition, deletePosition, clearPositions, exportCSV, exportJSON, importCSV, refreshPrices } =
+    usePortfolioState();
 
   const [form, setForm] = useState<Omit<Position, "id" | "currency" | "createdAt">>({
     ticker: "",
@@ -74,12 +48,32 @@ export default function PositionsCard() {
   const [importText, setImportText] = useState("");
   const [importErrs, setImportErrs] = useState<string[]>([]);
 
+  function normalizeCashLikeFields<T extends { assetClass: AssetClass; quantity: number; costBasisPerUnit: number; currentPrice?: number }>(
+    obj: T
+  ): T {
+    if (!isCashLike(obj.assetClass)) return obj;
+    return {
+      ...obj,
+      // For cash-like: quantity is the balance, prices are usually 1.00
+      costBasisPerUnit: Number.isFinite(obj.costBasisPerUnit) && obj.costBasisPerUnit > 0 ? obj.costBasisPerUnit : 1,
+      currentPrice: typeof obj.currentPrice === "number" && Number.isFinite(obj.currentPrice) && obj.currentPrice > 0 ? obj.currentPrice : 1,
+    };
+  }
+
   function handleAdd() {
-    const parsed = positionSchema.safeParse({
+    const cashNormalized = normalizeCashLikeFields({
       ...form,
       ticker: form.ticker.trim().toUpperCase(),
       quantity: Number(form.quantity),
       costBasisPerUnit: Number(form.costBasisPerUnit),
+      currentPrice: typeof form.currentPrice === "number" ? Number(form.currentPrice) : undefined,
+    });
+
+    const parsed = positionSchema.safeParse({
+      ...cashNormalized,
+      ticker: cashNormalized.ticker,
+      quantity: cashNormalized.quantity,
+      costBasisPerUnit: cashNormalized.costBasisPerUnit,
     });
 
     if (!parsed.success) {
@@ -98,15 +92,15 @@ export default function PositionsCard() {
     const position: Position = {
       id: crypto.randomUUID(),
       ticker: parsed.data.ticker,
-      name: form.name?.trim() || form.ticker.toUpperCase(),
+      name: cashNormalized.name?.trim() || parsed.data.ticker,
       assetClass: parsed.data.assetClass,
       accountType: parsed.data.accountType,
       quantity: parsed.data.quantity,
       costBasisPerUnit: parsed.data.costBasisPerUnit,
-      currentPrice: undefined,
+      currentPrice: cashNormalized.currentPrice,
       currency: "USD",
-      sector: form.sector,
-      purchaseDate: form.purchaseDate,
+      sector: cashNormalized.sector,
+      purchaseDate: cashNormalized.purchaseDate,
       createdAt: now,
     };
 
@@ -133,18 +127,25 @@ export default function PositionsCard() {
   function applyEdit() {
     if (!editing) return;
 
-    const parsed = positionSchema.safeParse({
-      ticker: editing.ticker,
-      name: editing.name,
-      assetClass: editing.assetClass,
-      accountType: editing.accountType,
+    const cashNormalized = normalizeCashLikeFields({
+      ...editing,
       quantity: Number(editing.quantity),
       costBasisPerUnit: Number(editing.costBasisPerUnit),
+      currentPrice: typeof editing.currentPrice === "number" ? Number(editing.currentPrice) : undefined,
+    });
+
+    const parsed = positionSchema.safeParse({
+      ticker: cashNormalized.ticker,
+      name: cashNormalized.name,
+      assetClass: cashNormalized.assetClass,
+      accountType: cashNormalized.accountType,
+      quantity: Number(cashNormalized.quantity),
+      costBasisPerUnit: Number(cashNormalized.costBasisPerUnit),
     });
 
     if (!parsed.success) return;
 
-    updatePosition({ ...editing });
+    updatePosition({ ...cashNormalized });
     setEditing(null);
   }
 
@@ -248,10 +249,7 @@ export default function PositionsCard() {
 
           <div>
             <label className="block text-sm mb-1">Account type</label>
-            <Select
-              value={form.accountType}
-              onChange={(e) => setForm({ ...form, accountType: e.target.value as AccountType })}
-            >
+            <Select value={form.accountType} onChange={(e) => setForm({ ...form, accountType: e.target.value as AccountType })}>
               {ACCOUNT_TYPES.map((at) => (
                 <option key={at} value={at}>
                   {at}
@@ -260,32 +258,48 @@ export default function PositionsCard() {
             </Select>
           </div>
 
-          {form.assetClass === "Money Market" || form.assetClass === "Cash" ? (
-            <div className="sm:col-span-2">
-              <label className="block text-sm mb-1">Balance ($)</label>
-              <Input
-                type="number"
-                value={form.costBasisPerUnit}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    costBasisPerUnit: Number(e.target.value),
-                    quantity: 1,
-                    currentPrice: 1,
-                  })
-                }
-              />
-              <p className="text-xs text-gray-600 mt-1">Money market / cash uses $1 NAV. Enter your current balance.</p>
-            </div>
+          {isCashLike(form.assetClass) ? (
+            <>
+              <div>
+                <label className="block text-sm mb-1">Balance ($)</label>
+                <Input
+                  type="number"
+                  value={form.quantity}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      quantity: Number(e.target.value),
+                      costBasisPerUnit: form.costBasisPerUnit || 1,
+                      currentPrice: form.currentPrice ?? 1,
+                    })
+                  }
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm mb-1">Purchase price ($)</label>
+                <Input
+                  type="number"
+                  value={form.costBasisPerUnit || 1}
+                  onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })}
+                />
+                <p className="text-xs text-gray-600 mt-1">Usually $1.00 for money markets.</p>
+              </div>
+
+              <div>
+                <label className="block text-sm mb-1">Current price ($)</label>
+                <Input
+                  type="number"
+                  value={form.currentPrice ?? 1}
+                  onChange={(e) => setForm({ ...form, currentPrice: Number(e.target.value) })}
+                />
+              </div>
+            </>
           ) : (
             <>
               <div>
                 <label className="block text-sm mb-1">Quantity</label>
-                <Input
-                  type="number"
-                  value={form.quantity}
-                  onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })}
-                />
+                <Input type="number" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} />
                 {errors.quantity && <p className="text-xs text-red-600 mt-1">{errors.quantity}</p>}
               </div>
 
@@ -387,7 +401,6 @@ export default function PositionsCard() {
                     const costTotal = p.costBasisPerUnit * p.quantity;
                     const plDollar = value - costTotal;
                     const plPct = costTotal > 0 ? (plDollar / costTotal) * 100 : 0;
-                    const isMM = p.assetClass === "Money Market";
 
                     return (
                       <tr key={p.id} className="border-t">
@@ -400,41 +413,7 @@ export default function PositionsCard() {
                         <td className="px-2 py-2 text-right">
                           {typeof p.currentPrice === "number" ? `$${p.currentPrice.toFixed(2)}` : "—"}
                         </td>
-
-                        <td className="px-2 py-2 text-right">
-                          {isMM ? (
-                            <div className="flex items-center justify-end gap-2">
-                              <Input
-                                type="number"
-                                className="h-8 w-24 text-right"
-                                value={String(mmEdits[p.id] !== undefined ? mmEdits[p.id] : Number(value.toFixed(2)))}
-                                onChange={(e) => setMmEdits((prev) => ({ ...prev, [p.id]: Number(e.target.value) }))}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter") {
-                                    const v = Number(mmEdits[p.id] ?? value);
-                                    handleUpdateMoneyMarketBalance(p, v);
-                                  }
-                                }}
-                              />
-
-                              <Button
-                                size="sm"
-                                onClick={() => {
-                                  const v = Number(mmEdits[p.id] ?? value);
-                                  handleUpdateMoneyMarketBalance(p, v);
-                                }}
-                              >
-                                Save
-                              </Button>
-
-                              <Tooltip text="Money market/CASH uses $1 NAV. Value equals current balance.">
-                                <span className="text-gray-400 cursor-help">?</span>
-                              </Tooltip>
-                            </div>
-                          ) : (
-                            <div className="inline-flex items-center gap-1">${value.toFixed(2)}</div>
-                          )}
-                        </td>
+                        <td className="px-2 py-2 text-right">${value.toFixed(2)}</td>
 
                         <td className={`px-2 py-2 text-right ${plDollar >= 0 ? "text-emerald-600" : "text-red-600"}`}>
                           {plDollar >= 0 ? "+" : ""}${plDollar.toFixed(2)}
@@ -476,7 +455,10 @@ export default function PositionsCard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-sm mb-1">Ticker</label>
-                <Input value={editing.ticker} onChange={(e) => setEditing({ ...editing, ticker: e.target.value.toUpperCase() })} />
+                <Input
+                  value={editing.ticker}
+                  onChange={(e) => setEditing({ ...editing, ticker: e.target.value.toUpperCase() })}
+                />
               </div>
 
               <div>
@@ -486,7 +468,10 @@ export default function PositionsCard() {
 
               <div>
                 <label className="block text-sm mb-1">Asset class</label>
-                <Select value={editing.assetClass} onChange={(e) => setEditing({ ...editing, assetClass: e.target.value as AssetClass })}>
+                <Select
+                  value={editing.assetClass}
+                  onChange={(e) => setEditing({ ...editing, assetClass: e.target.value as AssetClass })}
+                >
                   {ASSET_CLASSES.map((ac) => (
                     <option key={ac} value={ac}>
                       {ac}
@@ -497,7 +482,10 @@ export default function PositionsCard() {
 
               <div>
                 <label className="block text-sm mb-1">Account type</label>
-                <Select value={editing.accountType} onChange={(e) => setEditing({ ...editing, accountType: e.target.value as AccountType })}>
+                <Select
+                  value={editing.accountType}
+                  onChange={(e) => setEditing({ ...editing, accountType: e.target.value as AccountType })}
+                >
                   {ACCOUNT_TYPES.map((at) => (
                     <option key={at} value={at}>
                       {at}
@@ -506,23 +494,42 @@ export default function PositionsCard() {
                 </Select>
               </div>
 
-              {editing.assetClass === "Money Market" || editing.assetClass === "Cash" ? (
-                <div className="sm:col-span-2">
-                  <label className="block text-sm mb-1">Balance ($)</label>
-                  <Input
-                    type="number"
-                    value={editing.costBasisPerUnit}
-                    onChange={(e) =>
-                      setEditing({
-                        ...editing,
-                        costBasisPerUnit: Number(e.target.value),
-                        quantity: 1,
-                        currentPrice: 1,
-                      })
-                    }
-                  />
-                  <p className="text-xs text-gray-600 mt-1">Money market / cash uses $1 NAV.</p>
-                </div>
+              {isCashLike(editing.assetClass) ? (
+                <>
+                  <div>
+                    <label className="block text-sm mb-1">Balance ($)</label>
+                    <Input
+                      type="number"
+                      value={editing.quantity}
+                      onChange={(e) =>
+                        setEditing({
+                          ...editing,
+                          quantity: Number(e.target.value),
+                          costBasisPerUnit: editing.costBasisPerUnit || 1,
+                          currentPrice: editing.currentPrice ?? 1,
+                        })
+                      }
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm mb-1">Purchase price ($)</label>
+                    <Input
+                      type="number"
+                      value={editing.costBasisPerUnit || 1}
+                      onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm mb-1">Current price ($)</label>
+                    <Input
+                      type="number"
+                      value={editing.currentPrice ?? 1}
+                      onChange={(e) => setEditing({ ...editing, currentPrice: Number(e.target.value) })}
+                    />
+                  </div>
+                </>
               ) : (
                 <>
                   <div>
