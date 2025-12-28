@@ -1,16 +1,17 @@
 import { NextResponse } from "next/server";
 import YahooFinance from "yahoo-finance2";
 
-export const runtime = "nodejs";
+export const runtime = "nodejs"; // yahoo-finance2 needs Node runtime
 export const dynamic = "force-dynamic";
 
-// ✅ v3+ expects you to instantiate
+// v3+ usage: create an instance
 const yahooFinance = new YahooFinance();
 
 function parseDateParam(s: string | null): Date | undefined {
   if (!s) return undefined;
   const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? undefined : d;
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d;
 }
 
 function clampStart(start?: Date): Date | undefined {
@@ -20,49 +21,17 @@ function clampStart(start?: Date): Date | undefined {
   return start < tenYearsAgo ? tenYearsAgo : start;
 }
 
-type Point = { date: string; close: number };
+function isFridayAtOrBefore(d: Date) {
+  return d.getDay() === 5; // Fri
+}
 
-/**
- * Pick one point per week: Friday close (proxy for "Friday 4pm").
- * If a week has no Friday (holiday / missing data), we fall back to the latest day that week.
- */
-function downsampleToWeekly(rows: { date: Date; close: number }[]): Point[] {
-  // Group by ISO week key (YYYY-WW) using UTC dates
-  const weekKey = (d: Date) => {
-    const dt = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-    // ISO week calc
-    const day = dt.getUTCDay() || 7;
-    dt.setUTCDate(dt.getUTCDate() + 4 - day);
-    const yearStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
-    const weekNo = Math.ceil((((dt.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
-    return `${dt.getUTCFullYear()}-${String(weekNo).padStart(2, "0")}`;
-  };
-
-  const byWeek = new Map<string, { date: Date; close: number }[]>();
-  for (const r of rows) {
-    const key = weekKey(r.date);
-    const arr = byWeek.get(key) ?? [];
-    arr.push(r);
-    byWeek.set(key, arr);
+// Returns the most recent Friday (<= date). Keeps time same, we only use date anyway.
+function floorToFriday(date: Date): Date {
+  const d = new Date(date);
+  while (!isFridayAtOrBefore(d)) {
+    d.setDate(d.getDate() - 1);
   }
-
-  const out: Point[] = [];
-  const keys = Array.from(byWeek.keys()).sort((a, b) => a.localeCompare(b));
-
-  for (const key of keys) {
-    const arr = (byWeek.get(key) ?? []).slice().sort((a, b) => a.date.getTime() - b.date.getTime());
-    // Prefer Friday (UTC day 5), else last available day in that week
-    const friday = arr.filter((x) => x.date.getUTCDay() === 5).at(-1);
-    const chosen = friday ?? arr.at(-1);
-    if (!chosen) continue;
-
-    out.push({
-      date: chosen.date.toISOString().slice(0, 10),
-      close: Number(chosen.close),
-    });
-  }
-
-  return out;
+  return d;
 }
 
 export async function GET(req: Request) {
@@ -82,8 +51,6 @@ export async function GET(req: Request) {
       );
     }
 
-    // We’ll still accept 1d / 1wk / 1mo from the client,
-    // but "weekly" will be enforced by downsampling Friday closes.
     const interval = (searchParams.get("interval") || "1d") as "1d" | "1wk" | "1mo";
 
     const startRaw = parseDateParam(searchParams.get("start"));
@@ -92,36 +59,71 @@ export async function GET(req: Request) {
     const start = clampStart(startRaw);
     const end = endRaw;
 
+    // IMPORTANT: yahooFinance.historical requires period1 (cannot be undefined).
+    // Fallback: 1 year ago if no start provided.
+    const fallbackStart = new Date();
+    fallbackStart.setFullYear(fallbackStart.getFullYear() - 1);
+    const period1 = start ?? fallbackStart;
+
+    // If user is requesting weekly-like behavior, we’ll filter to Fridays only client-side.
+    // We still fetch 1d data from Yahoo for accuracy and then downsample.
+    const effectiveInterval = interval === "1wk" ? "1d" : interval;
+
     const results = await Promise.all(
       tickers.map(async (ticker) => {
-        // ✅ Build options without undefined (fixes TS overload error)
-        const opts: Record<string, any> = { interval: "1d" }; // always fetch daily, then downsample ourselves
-        if (start) opts.period1 = start;
+        // Use `any` to avoid Next/TS overload friction with yahoo-finance2 types.
+        const opts: any = {
+          period1,
+          interval: effectiveInterval,
+        };
         if (end) opts.period2 = end;
 
         const raw = (await yahooFinance.historical(ticker, opts)) as unknown;
         const rows: any[] = Array.isArray(raw) ? raw : [];
 
         const cleaned = rows
-          .filter(
-            (r) =>
-              r?.date &&
-              r.date instanceof Date &&
-              typeof r?.close === "number" &&
-              Number.isFinite(r.close),
-          )
-          .map((r) => ({ date: r.date as Date, close: Number(r.close) }))
-          .sort((a, b) => a.date.getTime() - b.date.getTime());
+          .filter((r) => r?.date && typeof r?.close === "number" && Number.isFinite(r.close))
+          .map((r) => ({
+            date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
+            close: Number(r.close),
+          }))
+          .sort((a, b) => a.date.localeCompare(b.date));
 
-        const points =
-          interval === "1wk"
-            ? downsampleToWeekly(cleaned)
-            : interval === "1mo"
-              ? downsampleToWeekly(cleaned) // (simple + light) keep it weekly for now; monthly can be done next
-              : cleaned.map((r) => ({
-                  date: r.date.toISOString().slice(0, 10),
-                  close: Number(r.close),
-                }));
+        // Weekly sampling: keep only Fridays (your “Friday close” model)
+        let points = cleaned;
+        if (interval === "1wk") {
+          points = cleaned.filter((p) => {
+            const d = new Date(p.date + "T12:00:00Z"); // stable day-of-week
+            return d.getUTCDay() === 5; // Friday
+          });
+
+          // If we ended up with 0 points (rare), at least include the last available point
+          if (points.length === 0 && cleaned.length > 0) {
+            const last = cleaned[cleaned.length - 1];
+            points = [last];
+          }
+        }
+
+        // Monthly sampling: last Friday of each month
+        if (interval === "1mo") {
+          const byMonth = new Map<string, { date: string; close: number }[]>();
+          for (const p of cleaned) {
+            const ym = p.date.slice(0, 7); // YYYY-MM
+            const arr = byMonth.get(ym) ?? [];
+            arr.push(p);
+            byMonth.set(ym, arr);
+          }
+
+          const monthly: { date: string; close: number }[] = [];
+          for (const [ym, arr] of byMonth.entries()) {
+            // pick last Friday in that month if present, else last trading day
+            const fridays = arr.filter((p) => new Date(p.date + "T12:00:00Z").getUTCDay() === 5);
+            const pick = (fridays.length ? fridays : arr)[(fridays.length ? fridays : arr).length - 1];
+            if (pick) monthly.push(pick);
+          }
+
+          points = monthly.sort((a, b) => a.date.localeCompare(b.date));
+        }
 
         return [ticker, points] as const;
       }),
@@ -132,7 +134,7 @@ export async function GET(req: Request) {
     return NextResponse.json({
       tickers,
       interval,
-      start: start ? start.toISOString().slice(0, 10) : undefined,
+      start: period1.toISOString().slice(0, 10),
       end: end ? end.toISOString().slice(0, 10) : undefined,
       data,
     });
