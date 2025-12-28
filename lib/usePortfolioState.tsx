@@ -9,6 +9,7 @@ import {
   UserProfile,
   AssetClass,
   AccountType,
+  Transaction,
 } from "./types";
 import {
   getInitialState,
@@ -32,6 +33,10 @@ export interface UsePortfolio {
   updatePosition: (p: Position) => void;
   deletePosition: (id: string) => void;
   clearPositions: () => void;
+
+  // NEW (for later): transactions
+  setTransactions: (txs: Transaction[]) => void;
+
   exportJSON: () => string;
   importJSON: (json: string) => void;
   exportCSV: () => string;
@@ -74,11 +79,15 @@ export function usePortfolioState(): UsePortfolio {
     setState((prev) => withSnapshot({ ...prev, positions: [] }));
   }, []);
 
+  // NEW: allow setting transactions (UI will come later)
+  const setTransactions = useCallback((txs: Transaction[]) => {
+    setState((prev) => withSnapshot({ ...prev, transactions: txs }));
+  }, []);
+
   const refreshPrices = useCallback(
     async (positionsOverride?: Position[]) => {
       const positionsToUse = positionsOverride ?? state.positions;
 
-      // Normalize tickers
       const tickers = Array.from(
         new Set(
           positionsToUse
@@ -94,8 +103,6 @@ export function usePortfolioState(): UsePortfolio {
       setState((prev) => {
         const positions = prev.positions.map((p) => {
           const t = (p.ticker || "").toUpperCase();
-
-          // For Money Market / Cash: default to $1 if we don't have a real feed price
           const isCashLike = p.assetClass === "Money Market" || p.assetClass === "Cash";
 
           const md = data[t];
@@ -147,14 +154,16 @@ export function usePortfolioState(): UsePortfolio {
     (json: string) => {
       try {
         const parsed = JSON.parse(json) as Partial<PortfolioState>;
+
         const next: PortfolioState = {
           profile: parsed.profile ?? null,
           positions: parsed.positions ?? [],
+          transactions: parsed.transactions ?? [], // <-- NEW
           snapshots: state.snapshots, // keep history
           lastUpdated: new Date().toISOString(),
         };
+
         setState(withSnapshot(next));
-        // refresh immediately using the imported positions
         void refreshPrices(next.positions);
       } catch {
         // ignore here; caller can validate first
@@ -269,7 +278,6 @@ export function usePortfolioState(): UsePortfolio {
         }
       }
 
-      // Merge duplicates: same ticker + accountType
       if (parsedPositions.length > 0) {
         const merged = new Map<string, Position>();
 
@@ -306,9 +314,13 @@ export function usePortfolioState(): UsePortfolio {
 
         const positionsToAdd = Array.from(merged.values());
 
-        setState((prev) => withSnapshot({ ...prev, positions: [...prev.positions, ...positionsToAdd] }));
+        setState((prev) =>
+          withSnapshot({
+            ...prev,
+            positions: [...prev.positions, ...positionsToAdd],
+          }),
+        );
 
-        // IMPORTANT: refresh using the imported positions, not stale state
         void refreshPrices(positionsToAdd);
       }
 
@@ -403,6 +415,7 @@ export function usePortfolioState(): UsePortfolio {
     updatePosition,
     deletePosition,
     clearPositions,
+    setTransactions,
     exportJSON,
     importJSON,
     exportCSV,

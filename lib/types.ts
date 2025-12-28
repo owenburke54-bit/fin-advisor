@@ -18,7 +18,7 @@ export type AccountType =
 
 export interface Position {
   id: string; // uuid
-  ticker: string; // e.g. AAPL, VOO, BTC-USD
+  ticker: string; // e.g. AAPL, VOO, BTCUSD
   name: string; // Friendly name
   assetClass: AssetClass;
   accountType: AccountType;
@@ -59,10 +59,52 @@ export interface PortfolioSnapshot {
   byAccountType: Record<AccountType, number>;
 }
 
+/**
+ * Transactions enable "true performance" charts.
+ * - BUY/SELL: represent trades (quantity in shares/coins, price in USD per unit).
+ * - CASH_DEPOSIT/WITHDRAWAL: represent contributions or withdrawals (amount in USD).
+ *
+ * Notes:
+ * - ticker is required for BUY/SELL.
+ * - quantity is required for BUY/SELL.
+ * - price is optional; if omitted, we can fall back to Yahoo close on that date.
+ * - accountType is optional; if omitted, treat as "Taxable" by default.
+ */
+export type TxType = "BUY" | "SELL" | "CASH_DEPOSIT" | "CASH_WITHDRAWAL";
+
+export interface Transaction {
+  id: string; // uuid
+  type: TxType;
+  date: string; // YYYY-MM-DD
+
+  // Trades
+  ticker?: string;
+  quantity?: number; // shares/coins
+  price?: number; // USD per unit (optional: can use historical close)
+
+  // Cash flows
+  amount?: number; // USD (positive number)
+
+  // Optional bucketing
+  accountType?: AccountType;
+}
+
+/**
+ * A daily point for performance charts.
+ * - totalValue: portfolio market value (positions + cash) for the date.
+ * - cashBalance: optional if you model cash.
+ */
+export interface PortfolioHistoryPoint {
+  date: string; // YYYY-MM-DD
+  totalValue: number;
+  cashBalance?: number;
+}
+
 export interface PortfolioState {
   profile: UserProfile | null;
   positions: Position[];
-  snapshots: PortfolioSnapshot[]; // historical snapshots
+  transactions: Transaction[]; // NEW: for true performance over time
+  snapshots: PortfolioSnapshot[]; // historical snapshots (user-triggered / auto snapshots)
   lastUpdated?: string;
 }
 
@@ -97,4 +139,3 @@ export function isBondLike(a: AssetClass): boolean {
 export function isCashLike(a: AssetClass): boolean {
   return a === "Cash" || a === "Money Market";
 }
-

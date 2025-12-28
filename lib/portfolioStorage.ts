@@ -1,4 +1,10 @@
-import { AccountType, AssetClass, PortfolioSnapshot, PortfolioState, Position } from "./types";
+import {
+  AccountType,
+  AssetClass,
+  PortfolioSnapshot,
+  PortfolioState,
+  Position,
+} from "./types";
 
 export const STORAGE_KEY = "portfolio-tracker-state-v1";
 
@@ -11,10 +17,43 @@ function safeParse<T>(raw: string | null): T | null {
   }
 }
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === "string";
+}
+
+function isNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+function normalizeLoadedState(raw: unknown): PortfolioState | null {
+  if (!isRecord(raw)) return null;
+
+  const profile = (raw["profile"] as PortfolioState["profile"]) ?? null;
+  const positions = Array.isArray(raw["positions"]) ? (raw["positions"] as Position[]) : [];
+  const snapshots = Array.isArray(raw["snapshots"]) ? (raw["snapshots"] as PortfolioSnapshot[]) : [];
+  const lastUpdated = isString(raw["lastUpdated"]) ? raw["lastUpdated"] : undefined;
+
+  // NEW: transactions (backwards compatible with older localStorage)
+  const transactions = Array.isArray(raw["transactions"]) ? (raw["transactions"] as PortfolioState["transactions"]) : [];
+
+  return {
+    profile,
+    positions,
+    transactions,
+    snapshots,
+    lastUpdated,
+  };
+}
+
 export function loadState(): PortfolioState | null {
   if (typeof window === "undefined") return null;
   const raw = window.localStorage.getItem(STORAGE_KEY);
-  return safeParse<PortfolioState>(raw);
+  const parsed = safeParse<unknown>(raw);
+  return normalizeLoadedState(parsed);
 }
 
 export function saveState(state: PortfolioState): void {
@@ -26,6 +65,7 @@ export function getInitialState(): PortfolioState {
   return {
     profile: null,
     positions: [],
+    transactions: [], // <-- added
     snapshots: [],
     lastUpdated: undefined,
   };
@@ -42,16 +82,15 @@ export function valueForPosition(p: Position): number {
   const qty = Number(p.quantity) || 0;
 
   const rawUnit =
-    typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+    isNumber(p.currentPrice)
       ? p.currentPrice
-      : typeof p.costBasisPerUnit === "number" && Number.isFinite(p.costBasisPerUnit)
+      : isNumber(p.costBasisPerUnit)
         ? p.costBasisPerUnit
         : 0;
 
   const isCashLike = p.assetClass === "Money Market" || p.assetClass === "Cash";
 
-  const unitPrice =
-    isCashLike && (rawUnit <= 0 || !Number.isFinite(rawUnit)) ? 1 : rawUnit;
+  const unitPrice = isCashLike && (rawUnit <= 0 || !Number.isFinite(rawUnit)) ? 1 : rawUnit;
 
   return qty * unitPrice;
 }
