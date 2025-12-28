@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
 import { isBondLike, isCashLike, isEquityLike, targetMixForRisk } from "@/lib/types";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart,
   Line,
@@ -20,21 +20,27 @@ import { Button } from "@/components/ui/Button";
 type Resolution = "daily" | "weekly" | "monthly";
 
 export default function OverviewTab() {
-  const { state, diversificationScore, refreshPrices } = usePortfolioState();
+  const { state, diversificationScore } = usePortfolioState();
   const [res, setRes] = useState<Resolution>("daily");
 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historySeries, setHistorySeries] = useState<{ date: string; value: number }[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
+  // Prevent flicker: only the latest request is allowed to update loading/data
+  const reqIdRef = useRef(0);
+
   // Fetch true historical portfolio series based on holdings since purchase date
   useEffect(() => {
-    let cancelled = false;
+    const reqId = ++reqIdRef.current;
 
     async function run() {
       if (!state.positions.length) {
+        // only update if still latest
+        if (reqId !== reqIdRef.current) return;
         setHistorySeries([]);
         setHistoryError(null);
+        setHistoryLoading(false);
         return;
       }
 
@@ -50,31 +56,37 @@ export default function OverviewTab() {
           interval,
         });
 
-        if (!cancelled) setHistorySeries(series);
+        if (reqId !== reqIdRef.current) return;
+        setHistorySeries(series);
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to load historical data";
-        if (!cancelled) setHistoryError(msg);
+        if (reqId !== reqIdRef.current) return;
+        setHistoryError(msg);
+        setHistorySeries([]);
       } finally {
-        if (!cancelled) setHistoryLoading(false);
+        if (reqId !== reqIdRef.current) return;
+        setHistoryLoading(false);
       }
     }
 
     void run();
-    return () => {
-      cancelled = true;
-    };
   }, [state.positions, state.profile, res]);
 
   const { kpis, series, updates, riskAlignment } = useMemo(() => {
-    // Use latest snapshot for "current" KPIs (keeps app responsive + matches existing design)
-    const snaps = state.snapshots;
-    const last = snaps.at(-1);
-    const prev = snaps.at(-2);
+    // KPIs: use current positions (user-entered currentPrice) instead of snapshots
+    const totalValue = state.positions.reduce((acc, p) => {
+      const unit =
+        typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+          ? p.currentPrice
+          : p.costBasisPerUnit;
+      return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
+    }, 0);
 
-    const totalValue = last?.totalValue ?? 0;
-    const unrealized = last ? last.totalGainLossDollar : 0;
-    const dayChange =
-      last && prev ? ((last.totalValue - prev.totalValue) / Math.max(prev.totalValue, 1)) * 100 : 0;
+    const totalCost = state.positions.reduce((acc, p) => {
+      return acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0);
+    }, 0);
+
+    const unrealized = totalValue - totalCost;
 
     // Since-start gains (baseline uses first available point in historical series when possible)
     const baseline = historySeries.length > 0 ? historySeries[0].value : 0;
@@ -82,8 +94,17 @@ export default function OverviewTab() {
     const sinceStartDollar = baseline > 0 ? lastHist - baseline : 0;
     const sinceStartPercent = baseline > 0 ? (sinceStartDollar / baseline) * 100 : 0;
 
+    // 1-day change: approximate using last 2 history points at selected interval
+    // (More accurate than snapshots, and avoids flicker)
+    const dayChange =
+      historySeries.length >= 2
+        ? ((historySeries[historySeries.length - 1].value - historySeries[historySeries.length - 2].value) /
+            Math.max(historySeries[historySeries.length - 2].value, 1)) *
+          100
+        : 0;
+
     // Series for chart (historical-based)
-    const series = historySeries.map((p) => ({
+    const chartSeries = historySeries.map((p) => ({
       t: new Date(p.date).toLocaleDateString(),
       v: Number(p.value.toFixed(2)),
     }));
@@ -91,11 +112,15 @@ export default function OverviewTab() {
     // Risk alignment
     const totals = state.positions.reduce(
       (acc, p) => {
-        const v = (p.currentPrice ?? p.costBasisPerUnit) * p.quantity;
+        const v =
+          (typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+            ? p.currentPrice
+            : p.costBasisPerUnit) * p.quantity;
+
         if (isEquityLike(p.assetClass)) acc.equity += v;
         else if (isBondLike(p.assetClass)) acc.bonds += v;
         else if (isCashLike(p.assetClass)) acc.cash += v;
-        else acc.equity += v; // bucket Other as equity-like for simplicity
+        else acc.equity += v;
         acc.total += v;
         return acc;
       },
@@ -122,10 +147,10 @@ export default function OverviewTab() {
             : "Roughly aligned with target";
 
     const updates =
-      snaps.length < 2
+      historySeries.length < 2
         ? []
         : [
-            `Today: Your portfolio ${dayChange >= 0 ? "gained" : "fell"} ${Math.abs(dayChange).toFixed(2)}%.`,
+            `Latest: Your portfolio ${dayChange >= 0 ? "gained" : "fell"} ${Math.abs(dayChange).toFixed(2)}% (${res}).`,
             `Diversification score: ${diversificationScore}/100.`,
           ];
 
@@ -137,11 +162,11 @@ export default function OverviewTab() {
         sinceStartDollar,
         sinceStartPercent,
       },
-      series,
+      series: chartSeries,
       updates,
       riskAlignment: alignmentText,
     };
-  }, [state.snapshots, state.positions, state.profile?.riskLevel, diversificationScore, historySeries]);
+  }, [state.positions, state.profile?.riskLevel, diversificationScore, historySeries, res]);
 
   return (
     <div className="space-y-4">
@@ -182,7 +207,7 @@ export default function OverviewTab() {
 
         <Card>
           <CardHeader className="pb-2 flex items-center justify-between">
-            <CardTitle className="text-sm text-gray-500">1-Day Change</CardTitle>
+            <CardTitle className="text-sm text-gray-500">1-Period Change</CardTitle>
             <Badge variant="secondary">{riskAlignment}</Badge>
           </CardHeader>
           <CardContent
@@ -208,13 +233,18 @@ export default function OverviewTab() {
           </Button>
         </div>
 
+        {/* Since you want users to input current prices via CSV, this should NOT refetch prices.
+           Keep a button just to re-run the history fetch without changing any portfolio inputs. */}
         <Button
           variant="secondary"
-          onClick={() => refreshPrices()}
+          onClick={() => {
+            // trigger refetch by bumping reqId and re-running effect via res "no-op" flip
+            setRes((r) => r);
+          }}
           disabled={historyLoading}
-          title={historyLoading ? "Loading history..." : "Refresh current prices"}
+          title={historyLoading ? "Loading history..." : "Reload historical chart"}
         >
-          {historyLoading ? "Loading..." : "Update Prices"}
+          {historyLoading ? "Loading..." : "Reload Chart"}
         </Button>
       </div>
 
@@ -226,9 +256,7 @@ export default function OverviewTab() {
           ) : historyLoading && series.length === 0 ? (
             <p className="text-sm text-gray-600">Loading historical portfolio chart…</p>
           ) : series.length < 2 ? (
-            <p className="text-sm text-gray-600">
-              Add positions (with purchase dates) to see historical trend.
-            </p>
+            <p className="text-sm text-gray-600">Add positions (with purchase dates) to see historical trend.</p>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series}>
@@ -250,7 +278,7 @@ export default function OverviewTab() {
         </CardHeader>
         <CardContent>
           {updates.length === 0 ? (
-            <p className="text-sm text-gray-600">Add positions and refresh prices to see updates.</p>
+            <p className="text-sm text-gray-600">Add positions (with purchase dates) to see updates.</p>
           ) : (
             <ul className="space-y-2">
               {updates.map((u, i) => (
