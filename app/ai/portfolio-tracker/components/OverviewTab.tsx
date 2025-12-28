@@ -18,7 +18,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 
 type Resolution = "daily" | "weekly" | "monthly";
-type ChartMode = "dollar" | "percent"; // ✅ NEW: $ vs % toggle
+type ChartMode = "dollar" | "percent";
 
 function fmtDollar(n: number) {
   return `$${Math.round(n).toLocaleString()}`;
@@ -29,15 +29,32 @@ function fmtPct(n: number) {
   return `${sign}${n.toFixed(2)}%`;
 }
 
+function formatAxisDate(iso: string) {
+  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatTooltipDate(iso: string) {
+  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 export default function OverviewTab() {
   const { state, diversificationScore } = usePortfolioState();
   const [res, setRes] = useState<Resolution>("daily");
-
-  // ✅ NEW: toggle for chart units
   const [mode, setMode] = useState<ChartMode>("dollar");
 
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historySeries, setHistorySeries] = useState<{ date: string; value: number }[]>([]);
+  const [historySeries, setHistorySeries] = useState<
+    {
+      date: string;
+      value: number;
+      breakdown?: Record<string, number>;
+    }[]
+  >([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [reloadNonce, setReloadNonce] = useState(0);
@@ -111,17 +128,18 @@ export default function OverviewTab() {
           100
         : 0;
 
-    // ✅ CHANGED: store ISO date; compute v based on $ or % mode
     const baseForPct = baseline > 0 ? baseline : 0;
 
+    // ✅ include breakdown for tooltip
     const chartSeries = historySeries.map((p) => {
       const dollar = Number(p.value.toFixed(2));
-      const percent =
-        baseForPct > 0 ? Number((((p.value / baseForPct) - 1) * 100).toFixed(4)) : 0;
+      const percent = baseForPct > 0 ? Number((((p.value / baseForPct) - 1) * 100).toFixed(4)) : 0;
 
       return {
-        d: p.date, // ISO date
+        d: p.date,
         v: mode === "dollar" ? dollar : percent,
+        breakdown: p.breakdown ?? {},
+        totalDollar: dollar, // convenient for tooltip
       };
     });
 
@@ -131,7 +149,6 @@ export default function OverviewTab() {
     const yMax = vals.length ? Math.max(...vals) : 0;
     const range = yMax - yMin;
 
-    // Slightly different padding for % vs $
     const pad =
       range > 0
         ? range * 0.12
@@ -215,7 +232,8 @@ export default function OverviewTab() {
           <CardContent
             className={`text-2xl font-semibold ${kpis.unrealized >= 0 ? "text-emerald-600" : "text-red-600"}`}
           >
-            {kpis.unrealized >= 0 ? "+" : ""}${kpis.unrealized.toFixed(2)}
+            {kpis.unrealized >= 0 ? "+" : ""}
+            ${kpis.unrealized.toFixed(2)}
           </CardContent>
         </Card>
 
@@ -245,7 +263,7 @@ export default function OverviewTab() {
         </Card>
       </div>
 
-      {/* Chart controls */}
+      {/* Controls */}
       <div className="flex items-center justify-between gap-3">
         <div className="flex gap-2">
           <Button variant={res === "daily" ? "default" : "secondary"} onClick={() => setRes("daily")}>
@@ -259,7 +277,6 @@ export default function OverviewTab() {
           </Button>
         </div>
 
-        {/* ✅ NEW: $ vs % toggle */}
         <div className="flex gap-2">
           <Button variant={mode === "dollar" ? "default" : "secondary"} onClick={() => setMode("dollar")}>
             $
@@ -285,32 +302,62 @@ export default function OverviewTab() {
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series}>
                 <CartesianGrid strokeDasharray="4 4" />
-                <XAxis
-                  dataKey="d"
-                  tickMargin={8}
-                  minTickGap={28}
-                  tickFormatter={(iso) =>
-                    new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" })
-                  }
-                />
+                <XAxis dataKey="d" tickMargin={8} minTickGap={28} tickFormatter={formatAxisDate} />
                 <YAxis
                   domain={yDomain}
                   tickFormatter={(v: number) => (mode === "dollar" ? fmtDollar(v) : `${v.toFixed(1)}%`)}
                 />
+
+                {/* ✅ CUSTOM TOOLTIP WITH BREAKDOWN */}
                 <ReTooltip
-                  formatter={(v: number) => [
-                    mode === "dollar" ? fmtDollar(v) : fmtPct(v),
-                    mode === "dollar" ? "Portfolio Value" : "Portfolio Return",
-                  ]}
-                  labelFormatter={(iso: string) =>
-                    new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, {
-                      weekday: "short",
-                      month: "short",
-                      day: "numeric",
-                      year: "numeric",
-                    })
-                  }
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.length) return null;
+
+                    const point = payload[0].payload as {
+                      d: string;
+                      v: number;
+                      breakdown: Record<string, number>;
+                      totalDollar: number;
+                    };
+
+                    // Sort breakdown biggest -> smallest, keep Cash at bottom if present
+                    const entries = Object.entries(point.breakdown || {});
+                    entries.sort((a, b) => b[1] - a[1]);
+                    const cashIdx = entries.findIndex(([k]) => k === "Cash");
+                    if (cashIdx >= 0) {
+                      const cash = entries.splice(cashIdx, 1)[0];
+                      entries.push(cash);
+                    }
+
+                    return (
+                      <div className="rounded-md border bg-white p-3 text-sm shadow-md">
+                        <div className="font-medium mb-1">{formatTooltipDate(point.d)}</div>
+
+                        <div className="font-semibold mb-2">
+                          Total: {mode === "dollar" ? fmtDollar(point.totalDollar) : fmtPct(point.v)}
+                        </div>
+
+                        {mode === "dollar" && entries.length > 0 && (
+                          <div className="space-y-1">
+                            {entries.map(([k, v]) => (
+                              <div key={k} className="flex justify-between gap-6">
+                                <span className="text-gray-600">{k}</span>
+                                <span className="font-mono">${v.toLocaleString()}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {mode === "percent" && (
+                          <div className="text-xs text-gray-500">
+                            Tip: switch to <span className="font-medium">$</span> to see ticker breakdown.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }}
                 />
+
                 <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>

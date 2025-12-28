@@ -72,8 +72,8 @@ async function fetchWithTimeout(
  *
  * This avoids missing months (e.g., November) due to API interval bucketing quirks.
  */
-function takeWeekEnd(points: { date: string; value: number }[]) {
-  const map: Record<string, { date: string; value: number }> = {};
+function takeWeekEnd<T extends { date: string }>(points: T[]): T[] {
+  const map: Record<string, T> = {};
 
   for (const p of points) {
     const dt = new Date(p.date + "T00:00:00Z");
@@ -88,13 +88,11 @@ function takeWeekEnd(points: { date: string; value: number }[]) {
     map[key] = p; // overwrite -> keeps latest point in the week
   }
 
-  return Object.values(map).sort(
-    (a, b) => a.date.localeCompare(b.date),
-  );
+  return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function takeMonthEnd(points: { date: string; value: number }[]) {
-  const map: Record<string, { date: string; value: number }> = {};
+function takeMonthEnd<T extends { date: string }>(points: T[]): T[] {
+  const map: Record<string, T> = {};
 
   for (const p of points) {
     const dt = new Date(p.date + "T00:00:00Z");
@@ -102,10 +100,18 @@ function takeMonthEnd(points: { date: string; value: number }[]) {
     map[key] = p; // overwrite -> keeps latest point in the month
   }
 
-  return Object.values(map).sort(
-    (a, b) => a.date.localeCompare(b.date),
-  );
+  return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
 }
+
+export type PortfolioSeriesPoint = {
+  date: string;
+  value: number;
+  /**
+   * Optional per-ticker breakdown for tooltips, allocation views, etc.
+   * Keys are tickers (e.g., "VOO", "NVDA") plus "Cash" if applicable.
+   */
+  breakdown?: Record<string, number>;
+};
 
 /**
  * Returns a portfolio value time series using historical closes since purchase date.
@@ -118,7 +124,7 @@ export async function fetchPortfolioSeries(opts: {
   positions: Position[];
   profile: UserProfile | null;
   interval: Interval;
-}): Promise<{ date: string; value: number }[]> {
+}): Promise<PortfolioSeriesPoint[]> {
   try {
     const { positions, profile, interval } = opts;
 
@@ -171,9 +177,17 @@ export async function fetchPortfolioSeries(opts: {
     // If you only have cash-like positions, return a *flat line with 2 points*
     // so the chart renders (many chart setups look broken with 1 point).
     if (tickers.length === 0) {
-      const flat = [
-        { date: start, value: Number(cashConstant.toFixed(2)) },
-        { date: end, value: Number(cashConstant.toFixed(2)) },
+      const flat: PortfolioSeriesPoint[] = [
+        {
+          date: start,
+          value: Number(cashConstant.toFixed(2)),
+          breakdown: cashConstant ? { Cash: Number(cashConstant.toFixed(2)) } : {},
+        },
+        {
+          date: end,
+          value: Number(cashConstant.toFixed(2)),
+          breakdown: cashConstant ? { Cash: Number(cashConstant.toFixed(2)) } : {},
+        },
       ];
 
       if (interval === "1wk") return takeWeekEnd(flat);
@@ -200,7 +214,7 @@ export async function fetchPortfolioSeries(opts: {
     });
 
     if (!res.ok) {
-      // fallback to 2-point approximation
+      // fallback to 2-point approximation (no per-ticker breakdown available here)
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
@@ -212,7 +226,7 @@ export async function fetchPortfolioSeries(opts: {
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      const flat = [
+      const flat: PortfolioSeriesPoint[] = [
         { date: start, value: v },
         { date: end, value: v },
       ];
@@ -255,7 +269,7 @@ export async function fetchPortfolioSeries(opts: {
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      const flat = [
+      const flat: PortfolioSeriesPoint[] = [
         { date: start, value: v },
         { date: end, value: v },
       ];
@@ -268,9 +282,7 @@ export async function fetchPortfolioSeries(opts: {
     // Forward-fill closes per ticker so portfolio value exists on all dates
     const closeByTickerByDate = new Map<string, Map<string, number>>();
     for (const t of tickers) {
-      const series = (data[t] ?? [])
-        .slice()
-        .sort((a, b) => a.date.localeCompare(b.date));
+      const series = (data[t] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
 
       const map = new Map<string, number>();
       let lastClose: number | undefined = undefined;
@@ -287,31 +299,51 @@ export async function fetchPortfolioSeries(opts: {
       closeByTickerByDate.set(t, map);
     }
 
-    // Sum portfolio value by date (daily series)
-    const out: { date: string; value: number }[] = [];
+    // Sum portfolio value by date (daily series) + breakdown by ticker
+    const out: PortfolioSeriesPoint[] = [];
+
     for (const d of dates) {
-      let total = cashConstant;
+      // breakdown on this date
+      const breakdown: Record<string, number> = {};
+      let total = 0;
+
+      if (cashConstant !== 0) {
+        breakdown["Cash"] = Number(cashConstant.toFixed(2));
+        total += cashConstant;
+      }
 
       for (const t of tickers) {
         const close = closeByTickerByDate.get(t)?.get(d);
         if (typeof close !== "number") continue;
 
         const plist = positionsByTicker.get(t) ?? [];
+        let tickerValue = 0;
+
         for (const p of plist) {
           const qty = toNumber(p.quantity);
-          total += qty * close;
+          tickerValue += qty * close;
+        }
+
+        if (tickerValue !== 0) {
+          const rounded = Number(tickerValue.toFixed(2));
+          breakdown[t] = rounded;
+          total += tickerValue;
         }
       }
 
-      out.push({ date: d, value: Number(total.toFixed(2)) });
+      out.push({
+        date: d,
+        value: Number(total.toFixed(2)),
+        breakdown,
+      });
     }
 
     // Ensure we have at least 2 points for the chart
     if (out.length === 1) {
-      out.push({ date: end, value: out[0].value });
+      out.push({ ...out[0], date: end });
     }
 
-    // Downsample to requested interval
+    // Downsample to requested interval (preserves breakdown)
     if (interval === "1wk") return takeWeekEnd(out);
     if (interval === "1mo") return takeMonthEnd(out);
     return out;
