@@ -18,15 +18,6 @@ function clampStart(start?: Date): Date | undefined {
   return start < tenYearsAgo ? tenYearsAgo : start;
 }
 
-function normalizeYahooSymbol(ticker: string): string {
-  const t = ticker.trim().toUpperCase();
-
-  // Common convenience: BTCUSD, ETHUSD -> BTC-USD, ETH-USD
-  if (/^[A-Z]{2,10}USD$/.test(t)) return `${t.slice(0, -3)}-USD`;
-
-  return t;
-}
-
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
@@ -45,6 +36,7 @@ export async function GET(req: Request) {
     }
 
     const interval = (searchParams.get("interval") || "1d") as "1d" | "1wk" | "1mo";
+
     const startRaw = parseDateParam(searchParams.get("start"));
     const endRaw = parseDateParam(searchParams.get("end"));
 
@@ -54,22 +46,27 @@ export async function GET(req: Request) {
     // Fetch all tickers in parallel
     const results = await Promise.all(
       tickers.map(async (ticker) => {
-        const symbol = normalizeYahooSymbol(ticker);
-
-        const rows = await yahooFinance.historical(symbol, {
+        // yahoo-finance2 typing can be finicky in Next builds; normalize to a real array
+        const raw = (await yahooFinance.historical(ticker, {
           period1: start,
           period2: end,
           interval,
-        });
+        })) as unknown;
 
-        const points =
-          (rows ?? [])
-            .filter((r) => r?.date && typeof r?.close === "number" && Number.isFinite(r.close))
-            .map((r) => ({
-              date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
-              close: Number(r.close),
-            }))
-            .sort((a, b) => a.date.localeCompare(b.date));
+        const rows: any[] = Array.isArray(raw) ? raw : [];
+
+        const points = rows
+          .filter(
+            (r) =>
+              r?.date &&
+              typeof r?.close === "number" &&
+              Number.isFinite(r.close),
+          )
+          .map((r) => ({
+            date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
+            close: Number(r.close),
+          }))
+          .sort((a, b) => a.date.localeCompare(b.date));
 
         return [ticker, points] as const;
       }),
@@ -77,25 +74,16 @@ export async function GET(req: Request) {
 
     const data = Object.fromEntries(results);
 
-    return NextResponse.json(
-      {
-        tickers,
-        interval,
-        start: start ? start.toISOString().slice(0, 10) : undefined,
-        end: end ? end.toISOString().slice(0, 10) : undefined,
-        data,
-      },
-      {
-        status: 200,
-        headers: {
-          // cache at Vercel edge (helps a LOT with Yahoo throttling)
-          "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
-        },
-      },
-    );
+    return NextResponse.json({
+      tickers,
+      interval,
+      start: start ? start.toISOString().slice(0, 10) : undefined,
+      end: end ? end.toISOString().slice(0, 10) : undefined,
+      data,
+    });
   } catch (err: any) {
     return NextResponse.json(
-      { error: err?.message ?? "History fetch failed" },
+      { error: "Failed to fetch historical data", detail: err?.message ?? String(err) },
       { status: 500 },
     );
   }
