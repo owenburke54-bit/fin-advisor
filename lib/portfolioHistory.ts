@@ -48,7 +48,10 @@ function clampStartNotFuture(startISO: string, endISO: string): string {
   return startISO;
 }
 
-async function fetchWithTimeout(input: RequestInfo, init: RequestInit & { timeoutMs?: number } = {}) {
+async function fetchWithTimeout(
+  input: RequestInfo,
+  init: RequestInit & { timeoutMs?: number } = {},
+) {
   const { timeoutMs = 12000, ...rest } = init;
 
   const controller = new AbortController();
@@ -59,6 +62,49 @@ async function fetchWithTimeout(input: RequestInfo, init: RequestInit & { timeou
   } finally {
     clearTimeout(t);
   }
+}
+
+/**
+ * Downsample helpers:
+ * We always build a daily (trading-day) series, then:
+ * - weekly: keep the last point per week
+ * - monthly: keep the last point per month
+ *
+ * This avoids missing months (e.g., November) due to API interval bucketing quirks.
+ */
+function takeWeekEnd(points: { date: string; value: number }[]) {
+  const map: Record<string, { date: string; value: number }> = {};
+
+  for (const p of points) {
+    const dt = new Date(p.date + "T00:00:00Z");
+    const year = dt.getUTCFullYear();
+
+    const firstJan = new Date(Date.UTC(year, 0, 1));
+    const days = Math.floor((dt.getTime() - firstJan.getTime()) / 86400000);
+    // Simple week number bucket (good enough for charting)
+    const week = Math.floor((days + firstJan.getUTCDay()) / 7);
+
+    const key = `${year}-W${week}`;
+    map[key] = p; // overwrite -> keeps latest point in the week
+  }
+
+  return Object.values(map).sort(
+    (a, b) => a.date.localeCompare(b.date),
+  );
+}
+
+function takeMonthEnd(points: { date: string; value: number }[]) {
+  const map: Record<string, { date: string; value: number }> = {};
+
+  for (const p of points) {
+    const dt = new Date(p.date + "T00:00:00Z");
+    const key = `${dt.getUTCFullYear()}-${dt.getUTCMonth()}`; // 0-based month bucket
+    map[key] = p; // overwrite -> keeps latest point in the month
+  }
+
+  return Object.values(map).sort(
+    (a, b) => a.date.localeCompare(b.date),
+  );
 }
 
 /**
@@ -125,17 +171,28 @@ export async function fetchPortfolioSeries(opts: {
     // If you only have cash-like positions, return a *flat line with 2 points*
     // so the chart renders (many chart setups look broken with 1 point).
     if (tickers.length === 0) {
-      return [
+      const flat = [
         { date: start, value: Number(cashConstant.toFixed(2)) },
         { date: end, value: Number(cashConstant.toFixed(2)) },
       ];
+
+      if (interval === "1wk") return takeWeekEnd(flat);
+      if (interval === "1mo") return takeMonthEnd(flat);
+      return flat;
     }
+
+    /**
+     * KEY CHANGE:
+     * Always fetch DAILY closes (1d) and downsample ourselves.
+     * This fixes missing months (e.g., November) that can happen with API 1mo aggregation.
+     */
+    const fetchInterval: Interval = "1d";
 
     const qs = new URLSearchParams();
     qs.set("tickers", tickers.join(","));
     qs.set("start", start);
     qs.set("end", end);
-    qs.set("interval", interval);
+    qs.set("interval", fetchInterval);
 
     const res = await fetchWithTimeout(`/api/history?${qs.toString()}`, {
       cache: "no-store",
@@ -147,15 +204,22 @@ export async function fetchPortfolioSeries(opts: {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
-          const unit = typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit;
+          const unit =
+            typeof p.currentPrice === "number"
+              ? p.currentPrice
+              : p.costBasisPerUnit;
           return acc + toNumber(p.quantity) * toNumber(unit);
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      return [
+      const flat = [
         { date: start, value: v },
         { date: end, value: v },
       ];
+
+      if (interval === "1wk") return takeWeekEnd(flat);
+      if (interval === "1mo") return takeMonthEnd(flat);
+      return flat;
     }
 
     const json = (await res.json()) as HistoryResponse;
@@ -171,7 +235,7 @@ export async function fetchPortfolioSeries(opts: {
       positionsByTicker.set(t, arr);
     }
 
-    // Build a unified date set across all tickers
+    // Build a unified date set across all tickers (daily/trading days)
     const allDates = new Set<string>();
     for (const t of tickers) {
       for (const pt of data[t] ?? []) allDates.add(pt.date);
@@ -183,21 +247,31 @@ export async function fetchPortfolioSeries(opts: {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
-          const unit = typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit;
+          const unit =
+            typeof p.currentPrice === "number"
+              ? p.currentPrice
+              : p.costBasisPerUnit;
           return acc + toNumber(p.quantity) * toNumber(unit);
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      return [
+      const flat = [
         { date: start, value: v },
         { date: end, value: v },
       ];
+
+      if (interval === "1wk") return takeWeekEnd(flat);
+      if (interval === "1mo") return takeMonthEnd(flat);
+      return flat;
     }
 
     // Forward-fill closes per ticker so portfolio value exists on all dates
     const closeByTickerByDate = new Map<string, Map<string, number>>();
     for (const t of tickers) {
-      const series = (data[t] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
+      const series = (data[t] ?? [])
+        .slice()
+        .sort((a, b) => a.date.localeCompare(b.date));
+
       const map = new Map<string, number>();
       let lastClose: number | undefined = undefined;
 
@@ -213,7 +287,7 @@ export async function fetchPortfolioSeries(opts: {
       closeByTickerByDate.set(t, map);
     }
 
-    // Sum portfolio value by date
+    // Sum portfolio value by date (daily series)
     const out: { date: string; value: number }[] = [];
     for (const d of dates) {
       let total = cashConstant;
@@ -237,6 +311,9 @@ export async function fetchPortfolioSeries(opts: {
       out.push({ date: end, value: out[0].value });
     }
 
+    // Downsample to requested interval
+    if (interval === "1wk") return takeWeekEnd(out);
+    if (interval === "1mo") return takeMonthEnd(out);
     return out;
   } catch {
     // Never let the UI hang.
