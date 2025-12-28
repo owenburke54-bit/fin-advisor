@@ -1,11 +1,8 @@
 import { NextResponse } from "next/server";
-import YahooFinance from "yahoo-finance2";
+import yahooFinance from "yahoo-finance2";
 
 export const runtime = "nodejs"; // yahoo-finance2 needs Node runtime
 export const dynamic = "force-dynamic";
-
-// ✅ v3+ requires instantiation
-const yahooFinance = new YahooFinance();
 
 function parseDateParam(s: string | null): Date | undefined {
   if (!s) return undefined;
@@ -25,9 +22,7 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
 
-    const tickersParam =
-      searchParams.get("tickers") || searchParams.get("ticker") || "";
-
+    const tickersParam = searchParams.get("tickers") || searchParams.get("ticker") || "";
     const tickers = tickersParam
       .split(",")
       .map((t) => t.trim().toUpperCase())
@@ -40,10 +35,7 @@ export async function GET(req: Request) {
       );
     }
 
-    const interval = (searchParams.get("interval") || "1d") as
-      | "1d"
-      | "1wk"
-      | "1mo";
+    const interval = (searchParams.get("interval") || "1d") as "1d" | "1wk" | "1mo";
 
     const startRaw = parseDateParam(searchParams.get("start"));
     const endRaw = parseDateParam(searchParams.get("end"));
@@ -51,25 +43,18 @@ export async function GET(req: Request) {
     const start = clampStart(startRaw);
     const end = endRaw;
 
-    // Fetch all tickers in parallel
     const results = await Promise.all(
       tickers.map(async (ticker) => {
-        // yahoo-finance2 typing can be finicky in Next builds; normalize to a real array
-        const raw = (await yahooFinance.historical(ticker, {
-          period1: start,
-          period2: end,
-          interval,
-        })) as unknown;
+        // Build options without undefined values (fixes TS overload error)
+        const options: Record<string, string | number | Date> = { interval };
+        if (start) options.period1 = start;
+        if (end) options.period2 = end;
 
+        const raw = (await yahooFinance.historical(ticker, options as any)) as unknown;
         const rows: any[] = Array.isArray(raw) ? raw : [];
 
         const points = rows
-          .filter(
-            (r) =>
-              r?.date &&
-              typeof r?.close === "number" &&
-              Number.isFinite(r.close),
-          )
+          .filter((r) => r?.date && typeof r?.close === "number" && Number.isFinite(r.close))
           .map((r) => ({
             date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
             close: Number(r.close),
@@ -91,10 +76,7 @@ export async function GET(req: Request) {
     });
   } catch (err: any) {
     return NextResponse.json(
-      {
-        error: "Failed to fetch historical data",
-        detail: err?.message ?? String(err),
-      },
+      { error: "Failed to fetch historical data", detail: err?.message ?? String(err) },
       { status: 500 },
     );
   }
