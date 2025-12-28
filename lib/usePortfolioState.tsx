@@ -88,6 +88,7 @@ export function usePortfolioState(): UsePortfolio {
     async (positionsOverride?: Position[]) => {
       const positionsToUse = positionsOverride ?? state.positions;
 
+      // Normalize tickers
       const tickers = Array.from(
         new Set(
           positionsToUse
@@ -314,19 +315,23 @@ export function usePortfolioState(): UsePortfolio {
 
         const positionsToAdd = Array.from(merged.values());
 
+        // ✅ Put the combined list in a local variable, then use it for BOTH setState and refreshPrices
+        const combined = [...state.positions, ...positionsToAdd];
+
         setState((prev) =>
           withSnapshot({
             ...prev,
-            positions: [...prev.positions, ...positionsToAdd],
+            positions: combined,
           }),
         );
 
-        void refreshPrices(positionsToAdd);
+        // ✅ This is the key fix: refresh against the full set (existing + newly imported)
+        void refreshPrices(combined);
       }
 
       return { success: errors.length === 0, errors };
     },
-    [refreshPrices],
+    [refreshPrices, state.positions],
   );
 
   function splitCsvRow(row: string): string[] {
