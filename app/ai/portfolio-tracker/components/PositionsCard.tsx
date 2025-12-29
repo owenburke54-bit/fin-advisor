@@ -68,6 +68,7 @@ export default function PositionsCard() {
     if (!isCashLike(obj.assetClass)) return obj;
     return {
       ...obj,
+      // for cash-like: treat quantity as balance, prices default to 1
       costBasisPerUnit: Number.isFinite(obj.costBasisPerUnit) && obj.costBasisPerUnit > 0 ? obj.costBasisPerUnit : 1,
       currentPrice:
         typeof obj.currentPrice === "number" && Number.isFinite(obj.currentPrice) && obj.currentPrice > 0 ? obj.currentPrice : 1,
@@ -163,6 +164,23 @@ export default function PositionsCard() {
     setEditing(null);
   }
 
+  // Live preview (derived fields)
+  const preview = useMemo(() => {
+    const qty = Number(form.quantity) || 0;
+    const cost = Number(form.costBasisPerUnit) || 0;
+    const current = typeof form.currentPrice === "number" ? Number(form.currentPrice) : undefined;
+
+    if (qty <= 0) return null;
+
+    const unit = typeof current === "number" ? current : cost;
+    const value = unit * qty;
+    const plDollar = (unit - cost) * qty;
+    const costTotal = cost * qty;
+    const plPct = costTotal > 0 ? (plDollar / costTotal) * 100 : 0;
+
+    return { value, plDollar, plPct };
+  }, [form.quantity, form.costBasisPerUnit, form.currentPrice]);
+
   return (
     <Card className="w-full">
       <CardHeader>
@@ -215,110 +233,128 @@ export default function PositionsCard() {
       </CardHeader>
 
       <CardContent className="space-y-5">
-        {/* Add form */}
-        <div className="grid grid-cols-1 sm:grid-cols-6 gap-3">
-          <div className="sm:col-span-2">
-            <label className="block text-sm mb-1">Ticker</label>
-            <Input value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} />
-            {errors.ticker && <p className="text-xs text-red-600 mt-1">{errors.ticker}</p>}
+        {/* Add form - reordered: ticker, name, asset, account, qty, initial, current */}
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-8 gap-3">
+            {/* Ticker */}
+            <div className="sm:col-span-1">
+              <label className="block text-sm mb-1">Ticker</label>
+              <Input value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} />
+              {errors.ticker && <p className="text-xs text-red-600 mt-1">{errors.ticker}</p>}
+            </div>
+
+            {/* Name */}
+            <div className="sm:col-span-2">
+              <label className="block text-sm mb-1">Name</label>
+              <Input value={form.name ?? ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            </div>
+
+            {/* Asset */}
+            <div>
+              <label className="block text-sm mb-1">Asset</label>
+              <Select value={form.assetClass} onChange={(e) => setForm({ ...form, assetClass: e.target.value as AssetClass })}>
+                {ASSET_CLASSES.map((ac) => (
+                  <option key={ac} value={ac}>
+                    {ac}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            {/* Account */}
+            <div>
+              <label className="block text-sm mb-1">Account</label>
+              <Select value={form.accountType} onChange={(e) => setForm({ ...form, accountType: e.target.value as AccountType })}>
+                {ACCOUNT_TYPES.map((at) => (
+                  <option key={at} value={at}>
+                    {at}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            {/* Quantity / Balance */}
+            <div>
+              <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Balance ($)" : "Quantity"}</label>
+              <Input
+                type="number"
+                value={form.quantity}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    quantity: Number(e.target.value),
+                    // cash-like defaults
+                    ...(isCashLike(form.assetClass)
+                      ? {
+                          costBasisPerUnit: form.costBasisPerUnit || 1,
+                          currentPrice: form.currentPrice ?? 1,
+                        }
+                      : {}),
+                  })
+                }
+              />
+              {errors.quantity && <p className="text-xs text-red-600 mt-1">{errors.quantity}</p>}
+            </div>
+
+            {/* Initial price */}
+            <div>
+              <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Initial price ($)" : "Initial price"}</label>
+              <Input
+                type="number"
+                value={isCashLike(form.assetClass) ? form.costBasisPerUnit || 1 : form.costBasisPerUnit}
+                onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })}
+              />
+              {errors.costBasisPerUnit && <p className="text-xs text-red-600 mt-1">{errors.costBasisPerUnit}</p>}
+              {isCashLike(form.assetClass) && <p className="text-xs text-gray-600 mt-1">Usually $1.00 for money markets.</p>}
+            </div>
+
+            {/* Current price */}
+            <div>
+              <label className="block text-sm mb-1">Current price</label>
+              <Input
+                type="number"
+                value={
+                  isCashLike(form.assetClass)
+                    ? form.currentPrice ?? 1
+                    : typeof form.currentPrice === "number"
+                      ? form.currentPrice
+                      : ""
+                }
+                placeholder={isCashLike(form.assetClass) ? "" : "Auto-fetch"}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    currentPrice:
+                      e.target.value === ""
+                        ? undefined
+                        : Number(e.target.value),
+                  })
+                }
+              />
+            </div>
           </div>
 
-          <div>
-            <label className="block text-sm mb-1">Purchase date (optional)</label>
-            <Input
-              type="date"
-              value={form.purchaseDate ?? ""}
-              onChange={(e) => setForm({ ...form, purchaseDate: e.target.value || undefined })}
-            />
-          </div>
-
-          <div className="sm:col-span-2">
-            <label className="block text-sm mb-1">Name</label>
-            <Input value={form.name ?? ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-          </div>
-
-          <div>
-            <label className="block text-sm mb-1">Asset class</label>
-            <Select value={form.assetClass} onChange={(e) => setForm({ ...form, assetClass: e.target.value as AssetClass })}>
-              {ASSET_CLASSES.map((ac) => (
-                <option key={ac} value={ac}>
-                  {ac}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          <div>
-            <label className="block text-sm mb-1">Account type</label>
-            <Select value={form.accountType} onChange={(e) => setForm({ ...form, accountType: e.target.value as AccountType })}>
-              {ACCOUNT_TYPES.map((at) => (
-                <option key={at} value={at}>
-                  {at}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          {isCashLike(form.assetClass) ? (
-            <>
+          {/* Derived preview: Value + P/L */}
+          {preview && (
+            <div className="flex flex-wrap gap-6 rounded-lg border bg-gray-50 px-3 py-2 text-sm text-gray-700">
               <div>
-                <label className="block text-sm mb-1">Balance ($)</label>
-                <Input
-                  type="number"
-                  value={form.quantity}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      quantity: Number(e.target.value),
-                      costBasisPerUnit: form.costBasisPerUnit || 1,
-                      currentPrice: form.currentPrice ?? 1,
-                    })
-                  }
-                />
+                <span className="font-medium">Value:</span> {fmtDollar(preview.value)}
               </div>
-
               <div>
-                <label className="block text-sm mb-1">Purchase price ($)</label>
-                <Input
-                  type="number"
-                  value={form.costBasisPerUnit || 1}
-                  onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })}
-                />
-                <p className="text-xs text-gray-600 mt-1">Usually $1.00 for money markets.</p>
+                <span className="font-medium">P/L:</span>{" "}
+                <span className={preview.plDollar >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
+                  {preview.plDollar >= 0 ? "+" : ""}
+                  {fmtDollar(preview.plDollar).replace("$-", "-$")}
+                </span>{" "}
+                <span className="text-gray-500">
+                  ({preview.plPct >= 0 ? "+" : ""}
+                  {preview.plPct.toFixed(2)}%)
+                </span>
               </div>
-
-              <div>
-                <label className="block text-sm mb-1">Current price ($)</label>
-                <Input type="number" value={form.currentPrice ?? 1} onChange={(e) => setForm({ ...form, currentPrice: Number(e.target.value) })} />
-              </div>
-            </>
-          ) : (
-            <>
-              <div>
-                <label className="block text-sm mb-1">Quantity</label>
-                <Input type="number" value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} />
-                {errors.quantity && <p className="text-xs text-red-600 mt-1">{errors.quantity}</p>}
-              </div>
-
-              <div>
-                <label className="block text-sm mb-1">Cost basis / unit ($)</label>
-                <Input type="number" value={form.costBasisPerUnit} onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })} />
-                {errors.costBasisPerUnit && <p className="text-xs text-red-600 mt-1">{errors.costBasisPerUnit}</p>}
-              </div>
-
-              <div>
-                <label className="block text-sm mb-1">Current price (optional)</label>
-                <Input
-                  type="number"
-                  value={typeof form.currentPrice === "number" ? form.currentPrice : ""}
-                  placeholder="Leave blank to auto-fetch"
-                  onChange={(e) => setForm({ ...form, currentPrice: e.target.value === "" ? undefined : Number(e.target.value) })}
-                />
-              </div>
-            </>
+            </div>
           )}
 
-          <div className="sm:col-span-6">
+          <div>
             <Button onClick={handleAdd}>Add Position</Button>
           </div>
         </div>
@@ -329,7 +365,6 @@ export default function PositionsCard() {
             <p className="text-sm text-gray-600">{totalPositions} positions</p>
           </div>
 
-          {/* allow overflow only when truly needed */}
           <div className="w-full overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -339,7 +374,7 @@ export default function PositionsCard() {
                   <th className="px-2 py-2 hidden md:table-cell w-[110px]">Asset</th>
                   <th className="px-2 py-2 hidden lg:table-cell w-[140px]">Account</th>
                   <th className="px-2 py-2 text-right hidden md:table-cell w-[90px]">Qty</th>
-                  <th className="px-2 py-2 text-right hidden md:table-cell w-[110px]">Cost/Unit</th>
+                  <th className="px-2 py-2 text-right hidden md:table-cell w-[110px]">Initial</th>
                   <th className="px-2 py-2 text-right hidden lg:table-cell w-[110px]">Current</th>
                   <th className="px-2 py-2 text-right w-[110px]">Value</th>
                   <th className="px-2 py-2 text-right hidden sm:table-cell w-[110px]">P/L</th>
@@ -488,7 +523,7 @@ export default function PositionsCard() {
                   </div>
 
                   <div>
-                    <label className="block text-sm mb-1">Purchase price ($)</label>
+                    <label className="block text-sm mb-1">Initial price ($)</label>
                     <Input type="number" value={editing.costBasisPerUnit || 1} onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })} />
                   </div>
 
@@ -505,7 +540,7 @@ export default function PositionsCard() {
                   </div>
 
                   <div>
-                    <label className="block text-sm mb-1">Cost basis / unit</label>
+                    <label className="block text-sm mb-1">Initial price</label>
                     <Input type="number" value={editing.costBasisPerUnit} onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })} />
                   </div>
 
@@ -514,7 +549,7 @@ export default function PositionsCard() {
                     <Input
                       type="number"
                       value={typeof editing.currentPrice === "number" ? editing.currentPrice : ""}
-                      placeholder="Leave blank to auto-fetch"
+                      placeholder="Auto-fetch"
                       onChange={(e) => setEditing({ ...editing, currentPrice: e.target.value === "" ? undefined : Number(e.target.value) })}
                     />
                   </div>
