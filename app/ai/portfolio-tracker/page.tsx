@@ -1,6 +1,7 @@
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardContent } from "@/components/ui/Card";
 import ProfileCard from "./components/ProfileCard";
+import PositionsImportCard from "./components/PositionsImportCard";
 import PositionsCard from "./components/PositionsCard";
 import TabsContainer from "./components/TabsContainer";
 import ResetDataButton from "./components/ResetDataButton";
@@ -8,8 +9,6 @@ import { Suspense } from "react";
 import { PortfolioProvider } from "@/lib/usePortfolioState";
 
 export default function PortfolioTrackerPage() {
-  // Parent server component – renders client subcomponents
-  // Wrap with PortfolioProvider so ALL child components share the same state.
   return (
     <PortfolioProvider>
       <main className="mx-auto max-w-7xl px-4 py-8">
@@ -28,6 +27,7 @@ export default function PortfolioTrackerPage() {
           </div>
         </header>
 
+        {/* Top: 2-column layout */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Left column: Inputs */}
           <div className="space-y-6">
@@ -44,11 +44,11 @@ export default function PortfolioTrackerPage() {
             <Suspense
               fallback={
                 <Card>
-                  <CardContent>Loading positions…</CardContent>
+                  <CardContent>Loading import…</CardContent>
                 </Card>
               }
             >
-              <PositionsCard />
+              <PositionsImportCard />
             </Suspense>
           </div>
 
@@ -56,6 +56,19 @@ export default function PortfolioTrackerPage() {
           <div>
             <TabsContainer />
           </div>
+        </div>
+
+        {/* Full-width positions section below BOTH columns */}
+        <div className="mt-6">
+          <Suspense
+            fallback={
+              <Card>
+                <CardContent>Loading positions…</CardContent>
+              </Card>
+            }
+          >
+            <PositionsCard />
+          </Suspense>
         </div>
 
         <footer className="mt-10">
