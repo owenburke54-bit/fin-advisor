@@ -20,6 +20,15 @@ import {
 
 const COLORS = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#a3a3a3"];
 
+function fmtDollar(n: number) {
+  const v = Number(n) || 0;
+  return `$${Math.round(v).toLocaleString()}`;
+}
+
+function fmtPct(p: number) {
+  return `${(p * 100).toFixed(1)}%`;
+}
+
 export default function AllocationTab() {
   const { state, diversificationScore, topConcentrations } = usePortfolioState();
 
@@ -27,22 +36,30 @@ export default function AllocationTab() {
     const byAsset = new Map<string, number>();
     const byAccount = new Map<string, number>();
     let total = 0;
+
     for (const p of state.positions) {
       const v = valueForPosition(p);
       total += v;
       byAsset.set(p.assetClass, (byAsset.get(p.assetClass) ?? 0) + v);
       byAccount.set(p.accountType, (byAccount.get(p.accountType) ?? 0) + v);
     }
+
     const assetData = Array.from(byAsset.entries()).map(([name, value]) => ({
       name,
       value: Number(value.toFixed(2)),
       percent: total ? value / total : 0,
     }));
+
     const accountData = Array.from(byAccount.entries()).map(([name, value]) => ({
       name,
       value: Number(value.toFixed(2)),
       percent: total ? value / total : 0,
     }));
+
+    // Sort (largest first) for nicer visuals/legend order
+    assetData.sort((a, b) => b.value - a.value);
+    accountData.sort((a, b) => b.value - a.value);
+
     return { assetData, accountData, total };
   }, [state.positions]);
 
@@ -59,17 +76,32 @@ export default function AllocationTab() {
             ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
-                  <Pie data={assetData} dataKey="value" nameKey="name" outerRadius={90}>
+                  <Pie
+                    data={assetData}
+                    dataKey="value"
+                    nameKey="name"
+                    outerRadius={90}
+                    labelLine={false}
+                    label={({ name, percent }) => `${name} ${fmtPct(Number(percent) || 0)}`}
+                  >
                     {assetData.map((_, idx) => (
                       <Cell key={idx} fill={COLORS[idx % COLORS.length]} />
                     ))}
                   </Pie>
-                  <ReTooltip />
+
+                  <ReTooltip
+                    formatter={(value: any, _name: any, props: any) => {
+                      const payload = props?.payload as { percent?: number; name?: string };
+                      const pct = typeof payload?.percent === "number" ? ` (${fmtPct(payload.percent)})` : "";
+                      return [`${fmtDollar(Number(value))}${pct}`, payload?.name ?? "Value"];
+                    }}
+                  />
                 </PieChart>
               </ResponsiveContainer>
             )}
           </CardContent>
         </Card>
+
         <Card>
           <CardHeader>
             <CardTitle>Account Type Allocation</CardTitle>
@@ -79,12 +111,15 @@ export default function AllocationTab() {
               <p className="text-sm text-gray-600">Add positions to see allocation.</p>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={accountData}>
+                <BarChart data={accountData} margin={{ left: 8, right: 8 }}>
                   <CartesianGrid strokeDasharray="4 4" />
-                  <XAxis dataKey="name" />
-                  <YAxis />
-                  <ReTooltip />
-                  <Bar dataKey="value" fill="#2563eb" />
+                  <XAxis dataKey="name" tickMargin={8} />
+                  <YAxis tickFormatter={(v: number) => fmtDollar(v)} />
+                  <ReTooltip
+                    formatter={(value: any) => fmtDollar(Number(value))}
+                    labelFormatter={(label: any) => `Account: ${String(label)}`}
+                  />
+                  <Bar dataKey="value" fill="#2563eb" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -122,7 +157,7 @@ export default function AllocationTab() {
             <ul className="space-y-1">
               {topConcentrations.map((c) => (
                 <li key={c.ticker} className="text-sm">
-                  <span className="font-medium">{c.ticker}</span> — {(c.percent * 100).toFixed(1)}% (${c.value.toFixed(2)})
+                  <span className="font-medium">{c.ticker}</span> — {(c.percent * 100).toFixed(1)}% ({fmtDollar(c.value)})
                   {c.percent > 0.2 && <span className="ml-2 text-red-600">Warning: over 20% concentration</span>}
                 </li>
               ))}
@@ -133,4 +168,3 @@ export default function AllocationTab() {
     </div>
   );
 }
-

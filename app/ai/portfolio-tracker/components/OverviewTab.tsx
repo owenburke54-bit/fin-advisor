@@ -1,10 +1,11 @@
 "use client";
 
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
 import { isBondLike, isCashLike, isEquityLike, targetMixForRisk } from "@/lib/types";
-import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart,
   Line,
@@ -14,7 +15,6 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-import { Button } from "@/components/ui/Button";
 
 type ChartMode = "dollar" | "percent";
 type Timeframe = "all" | "1m" | "1y";
@@ -95,7 +95,7 @@ async function fetchHistoryTicker(opts: {
   }
 }
 
-/** Pill-style timeframe selector like your screenshot */
+/** Pill-style timeframe selector */
 function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => void }) {
   const { value, onChange } = props;
 
@@ -134,31 +134,23 @@ function MetricCard(props: {
   title: string;
   value: React.ReactNode;
   subValue?: React.ReactNode;
-  badgeText?: string;
   valueClassName?: string;
+  subValueClassName?: string;
 }) {
-  const { title, value, subValue, badgeText, valueClassName } = props;
+  const { title, value, subValue, valueClassName, subValueClassName } = props;
 
   return (
     <Card className="h-full">
       <CardContent className="p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-gray-600">{title}</p>
-          </div>
-
-          {badgeText ? (
-            <div className="shrink-0 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
-              {badgeText}
-            </div>
-          ) : null}
-        </div>
+        <p className="text-sm font-medium text-gray-600">{title}</p>
 
         <div className="mt-3">
           <div className={`text-2xl font-semibold tracking-tight text-gray-900 ${valueClassName ?? ""}`}>
             {value}
           </div>
-          {subValue ? <div className="mt-1 text-sm text-gray-600">{subValue}</div> : null}
+          {subValue ? (
+            <div className={`mt-1 text-sm font-medium ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
+          ) : null}
         </div>
       </CardContent>
     </Card>
@@ -174,11 +166,7 @@ export default function OverviewTab() {
 
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historySeries, setHistorySeries] = useState<
-    {
-      date: string;
-      value: number;
-      breakdown?: Record<string, number>;
-    }[]
+    { date: string; value: number; breakdown?: Record<string, number> }[]
   >([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
@@ -228,7 +216,7 @@ export default function OverviewTab() {
     void run();
   }, [state.positions, state.profile, reloadNonce]);
 
-  // Compute cutoff date for timeframe
+  // Cutoff date for timeframe
   const cutoffISO = useMemo(() => {
     const end = todayISO();
     if (timeframe === "1m") return addDaysISO(end, -30);
@@ -236,19 +224,17 @@ export default function OverviewTab() {
     return undefined;
   }, [timeframe]);
 
-  // Filtered portfolio series for the chart
+  // Filtered series for chart (timeframe)
   const filteredHistorySeries = useMemo(() => {
     if (!cutoffISO) return historySeries;
 
     const filtered = historySeries.filter((p) => p.date >= cutoffISO);
-
     if (filtered.length >= 2) return filtered;
     if (historySeries.length >= 2) return historySeries.slice(-2);
-
     return filtered;
   }, [historySeries, cutoffISO]);
 
-  // Fetch benchmark ONLY when enabled and based on filtered range
+  // Fetch benchmark for filtered range
   useEffect(() => {
     const benchReqId = ++benchReqIdRef.current;
 
@@ -281,8 +267,8 @@ export default function OverviewTab() {
     void runBench();
   }, [filteredHistorySeries, showBenchmark]);
 
-  const { kpis, chartData, yDomain, updates, riskAlignment, periodLabel, killer } = useMemo(() => {
-    // KPIs: use current positions (user-entered currentPrice)
+  const { kpis, chartData, yDomain, updates, killer, periodLabel } = useMemo(() => {
+    // KPIs: current positions (currentPrice fallback)
     const totalValue = state.positions.reduce((acc, p) => {
       const unit =
         typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
@@ -296,19 +282,22 @@ export default function OverviewTab() {
 
     const unrealized = totalValue - totalCost;
 
-    // Since Start KPI: always use full history start
+    // Since Start KPI: full history range
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
     const fullLast = historySeries.length ? historySeries.at(-1)!.value : 0;
     const sinceStartDollar = fullBaseline > 0 ? fullLast - fullBaseline : 0;
     const sinceStartPercent = fullBaseline > 0 ? (sinceStartDollar / fullBaseline) * 100 : 0;
 
-    // 1-day change based on last 2 points in FULL history
+    // 1-day change from last 2 points in full history
     const periodChange =
       historySeries.length >= 2
-        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) / Math.max(historySeries.at(-2)!.value, 1)) * 100
+        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) / Math.max(historySeries.at(-2)!.value, 1)) *
+          100
         : 0;
 
-    // Chart baseline: use filtered chart baseline so 1M/1Y resets
+    const periodLabel = "1-Day Change";
+
+    // Percent baseline for chart depends on filtered timeframe
     const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
 
     // Benchmark alignment
@@ -328,10 +317,13 @@ export default function OverviewTab() {
       const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
+      const benchPct =
+        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : 0;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
+          ? chartBaseline * (benchClose / benchFirstClose)
+          : 0;
 
       return {
         d: p.date,
@@ -344,7 +336,7 @@ export default function OverviewTab() {
       };
     });
 
-    // Domain
+    // Y domain
     const vals = aligned.flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v])).filter((n) => Number.isFinite(n));
     const yMin = vals.length ? Math.min(...vals) : 0;
     const yMax = vals.length ? Math.max(...vals) : 0;
@@ -359,33 +351,7 @@ export default function OverviewTab() {
 
     const yDomain: [number, number] = [yMin - pad, yMax + pad];
 
-    // Risk alignment
-    const totals = state.positions.reduce(
-      (acc, p) => {
-        const v = (typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit) * p.quantity;
-
-        if (isEquityLike(p.assetClass)) acc.equity += v;
-        else if (isBondLike(p.assetClass)) acc.bonds += v;
-        else if (isCashLike(p.assetClass)) acc.cash += v;
-        else acc.equity += v;
-        acc.total += v;
-        return acc;
-      },
-      { equity: 0, bonds: 0, cash: 0, total: 0 },
-    );
-
-    const target = targetMixForRisk(state.profile?.riskLevel ?? 3);
-    const deltaEquity = totals.total ? Math.round(((totals.equity / totals.total) - target.equity) * 100) : 0;
-
-    const alignmentText =
-      totals.total === 0
-        ? "No positions yet"
-        : deltaEquity > 10
-          ? "More aggressive than target"
-          : deltaEquity < -10
-            ? "More conservative than target"
-            : "Roughly aligned with target";
-
+    // Updates
     const updates =
       historySeries.length < 2
         ? []
@@ -394,7 +360,7 @@ export default function OverviewTab() {
             `Diversification score: ${diversificationScore}/100.`,
           ];
 
-    // Killer insight: biggest unrealized contributor
+    // Killer insight: biggest unrealized contributor (by absolute P/L)
     const killer = (() => {
       if (!state.positions.length) return null;
 
@@ -402,13 +368,10 @@ export default function OverviewTab() {
         .map((p) => {
           const current =
             typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
-
           const cost = Number(p.costBasisPerUnit) || 0;
           const qty = Number(p.quantity) || 0;
           const pnl = (current - cost) * qty;
-
-          const value = current * qty;
-          return { ticker: p.ticker, pnl, value };
+          return { ticker: p.ticker, pnl };
         })
         .filter((r) => r.ticker);
 
@@ -417,11 +380,15 @@ export default function OverviewTab() {
       rows.sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
       const top = rows[0];
 
-      const dir = top.pnl >= 0 ? "gain" : "loss";
-      return { ticker: top.ticker, pnl: top.pnl, dir };
+      return {
+        ticker: top.ticker,
+        pnl: top.pnl,
+        dir: top.pnl >= 0 ? "gains" : "losses",
+      };
     })();
 
-    const periodLabel = "1-Day Change";
+    // Risk alignment removed from UI, but keep calc here for potential later use
+    // (no-op)
 
     return {
       kpis: {
@@ -434,9 +401,8 @@ export default function OverviewTab() {
       chartData: aligned,
       yDomain,
       updates,
-      riskAlignment: alignmentText,
-      periodLabel,
       killer,
+      periodLabel,
     };
   }, [
     state.positions,
@@ -474,15 +440,25 @@ export default function OverviewTab() {
               ${kpis.sinceStartDollar.toFixed(2)}
             </>
           }
-          subValue={`${kpis.sinceStartPercent >= 0 ? "+" : ""}${kpis.sinceStartPercent.toFixed(2)}%`}
           valueClassName={kpis.sinceStartDollar >= 0 ? "text-emerald-600" : "text-red-600"}
+          subValue={
+            <>
+              {kpis.sinceStartPercent >= 0 ? "+" : ""}
+              {kpis.sinceStartPercent.toFixed(2)}%
+            </>
+          }
+          subValueClassName={kpis.sinceStartPercent >= 0 ? "text-emerald-600" : "text-red-600"}
         />
 
         <MetricCard
           title={periodLabel}
-          value={`${kpis.dayChange >= 0 ? "+" : ""}${kpis.dayChange.toFixed(2)}%`}
+          value={
+            <>
+              {kpis.dayChange >= 0 ? "+" : ""}
+              {kpis.dayChange.toFixed(2)}%
+            </>
+          }
           valueClassName={kpis.dayChange >= 0 ? "text-emerald-600" : "text-red-600"}
-          badgeText={riskAlignment}
         />
       </div>
 
@@ -603,7 +579,7 @@ export default function OverviewTab() {
                 {/* Portfolio line */}
                 <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2} dot={false} />
 
-                {/* Benchmark line (dashed) */}
+                {/* Benchmark line */}
                 {showBenchmark && (
                   <Line
                     type="monotone"
@@ -630,15 +606,12 @@ export default function OverviewTab() {
 
           {killer ? (
             <div className="mt-2 text-sm text-gray-900">
-              <span className="font-semibold">{killer.ticker}</span> is your biggest driver of{" "}
-              {killer.dir} right now (
+              <span className="font-semibold">{killer.ticker}</span> is your biggest driver of {killer.dir} right now (
               <span className={killer.pnl >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
                 {killer.pnl >= 0 ? "+" : ""}${killer.pnl.toFixed(2)}
               </span>
               ).{" "}
-              <span className="text-gray-600">
-                If you want a smoother ride, reduce single-name concentration over time.
-              </span>
+              <span className="text-gray-600">If you want a smoother ride, reduce single-name concentration over time.</span>
             </div>
           ) : (
             <div className="mt-2 text-sm text-gray-600">Add positions to see your biggest return driver.</div>
