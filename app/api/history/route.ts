@@ -21,17 +21,13 @@ function clampStart(start?: Date): Date | undefined {
   return start < tenYearsAgo ? tenYearsAgo : start;
 }
 
-function isFridayAtOrBefore(d: Date) {
-  return d.getDay() === 5; // Fri
-}
-
-// Returns the most recent Friday (<= date). Keeps time same, we only use date anyway.
-function floorToFriday(date: Date): Date {
-  const d = new Date(date);
-  while (!isFridayAtOrBefore(d)) {
-    d.setDate(d.getDate() - 1);
-  }
-  return d;
+function normalizeTickerForYahoo(raw: string) {
+  // Keep it simple + predictable:
+  // - uppercase + trim
+  // - convert crypto "BTC/USD" -> "BTC-USD"
+  // - convert class shares "BRK.B" -> "BRK-B"
+  const s = raw.trim().toUpperCase();
+  return s.replaceAll("/", "-").replaceAll(".", "-");
 }
 
 export async function GET(req: Request) {
@@ -70,62 +66,77 @@ export async function GET(req: Request) {
     const effectiveInterval = interval === "1wk" ? "1d" : interval;
 
     const results = await Promise.all(
-      tickers.map(async (ticker) => {
-        // Use `any` to avoid Next/TS overload friction with yahoo-finance2 types.
-        const opts: any = {
-          period1,
-          interval: effectiveInterval,
-        };
-        if (end) opts.period2 = end;
+      tickers.map(async (originalTicker) => {
+        const yfTicker = normalizeTickerForYahoo(originalTicker);
 
-        const raw = (await yahooFinance.historical(ticker, opts)) as unknown;
-        const rows: any[] = Array.isArray(raw) ? raw : [];
+        try {
+          // Use `any` to avoid Next/TS overload friction with yahoo-finance2 types.
+          const opts: any = {
+            period1,
+            interval: effectiveInterval,
+          };
+          if (end) opts.period2 = end;
 
-        const cleaned = rows
-          .filter((r) => r?.date && typeof r?.close === "number" && Number.isFinite(r.close))
-          .map((r) => ({
-            date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
-            close: Number(r.close),
-          }))
-          .sort((a, b) => a.date.localeCompare(b.date));
+          const raw = (await yahooFinance.historical(yfTicker, opts)) as unknown;
+          const rows: any[] = Array.isArray(raw) ? raw : [];
 
-        // Weekly sampling: keep only Fridays (your “Friday close” model)
-        let points = cleaned;
-        if (interval === "1wk") {
-          points = cleaned.filter((p) => {
-            const d = new Date(p.date + "T12:00:00Z"); // stable day-of-week
-            return d.getUTCDay() === 5; // Friday
-          });
+          const cleaned = rows
+            .filter((r) => r?.date && typeof r?.close === "number" && Number.isFinite(r.close))
+            .map((r) => ({
+              date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
+              close: Number(r.close),
+            }))
+            .sort((a, b) => a.date.localeCompare(b.date));
 
-          // If we ended up with 0 points (rare), at least include the last available point
-          if (points.length === 0 && cleaned.length > 0) {
-            const last = cleaned[cleaned.length - 1];
-            points = [last];
+          // Weekly sampling: keep only Fridays (your “Friday close” model)
+          let points = cleaned;
+          if (interval === "1wk") {
+            points = cleaned.filter((p) => {
+              const d = new Date(p.date + "T12:00:00Z"); // stable day-of-week
+              return d.getUTCDay() === 5; // Friday
+            });
+
+            // If we ended up with 0 points (rare), at least include the last available point
+            if (points.length === 0 && cleaned.length > 0) {
+              const last = cleaned[cleaned.length - 1];
+              points = [last];
+            }
           }
+
+          // Monthly sampling: last Friday of each month
+          if (interval === "1mo") {
+            const byMonth = new Map<string, { date: string; close: number }[]>();
+            for (const p of cleaned) {
+              const ym = p.date.slice(0, 7); // YYYY-MM
+              const arr = byMonth.get(ym) ?? [];
+              arr.push(p);
+              byMonth.set(ym, arr);
+            }
+
+            const monthly: { date: string; close: number }[] = [];
+            for (const [, arr] of byMonth.entries()) {
+              // pick last Friday in that month if present, else last trading day
+              const fridays = arr.filter((p) => new Date(p.date + "T12:00:00Z").getUTCDay() === 5);
+              const bucket = fridays.length ? fridays : arr;
+              const pick = bucket[bucket.length - 1];
+              if (pick) monthly.push(pick);
+            }
+
+            points = monthly.sort((a, b) => a.date.localeCompare(b.date));
+          }
+
+          // Key response by the ORIGINAL ticker so your UI continues to match
+          return [originalTicker, points] as const;
+        } catch (e: any) {
+          // Don’t kill the entire request; return empty series + error marker
+          return [
+            originalTicker,
+            {
+              error: `Failed for ${originalTicker} (Yahoo: ${yfTicker}): ${e?.message ?? String(e)}`,
+              points: [],
+            },
+          ] as const;
         }
-
-        // Monthly sampling: last Friday of each month
-        if (interval === "1mo") {
-          const byMonth = new Map<string, { date: string; close: number }[]>();
-          for (const p of cleaned) {
-            const ym = p.date.slice(0, 7); // YYYY-MM
-            const arr = byMonth.get(ym) ?? [];
-            arr.push(p);
-            byMonth.set(ym, arr);
-          }
-
-          const monthly: { date: string; close: number }[] = [];
-          for (const [ym, arr] of byMonth.entries()) {
-            // pick last Friday in that month if present, else last trading day
-            const fridays = arr.filter((p) => new Date(p.date + "T12:00:00Z").getUTCDay() === 5);
-            const pick = (fridays.length ? fridays : arr)[(fridays.length ? fridays : arr).length - 1];
-            if (pick) monthly.push(pick);
-          }
-
-          points = monthly.sort((a, b) => a.date.localeCompare(b.date));
-        }
-
-        return [ticker, points] as const;
       }),
     );
 
