@@ -91,6 +91,9 @@ export default function OverviewTab() {
   const [res, setRes] = useState<Resolution>("daily");
   const [mode, setMode] = useState<ChartMode>("dollar");
 
+  // ✅ NEW: toggle for showing benchmark line
+  const [showBenchmark, setShowBenchmark] = useState(true);
+
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historySeries, setHistorySeries] = useState<
     {
@@ -101,17 +104,14 @@ export default function OverviewTab() {
   >([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
-  // ✅ NEW: Benchmark (SPY) loading/data
   const [benchLoading, setBenchLoading] = useState(false);
   const [benchSeries, setBenchSeries] = useState<{ date: string; close: number }[]>([]);
 
   const [reloadNonce, setReloadNonce] = useState(0);
 
-  // Prevent flicker: only the latest request is allowed to update loading/data
   const reqIdRef = useRef(0);
   const benchReqIdRef = useRef(0);
 
-  // Fetch true historical portfolio series based on holdings since purchase date
   useEffect(() => {
     const reqId = ++reqIdRef.current;
 
@@ -151,12 +151,12 @@ export default function OverviewTab() {
     void run();
   }, [state.positions, state.profile, res, reloadNonce]);
 
-  // ✅ NEW: Fetch benchmark (SPY) and align to portfolio date range
+  // ✅ Fetch benchmark only when toggle is ON
   useEffect(() => {
     const benchReqId = ++benchReqIdRef.current;
 
     async function runBench() {
-      if (historySeries.length < 2) {
+      if (!showBenchmark || historySeries.length < 2) {
         if (benchReqId !== benchReqIdRef.current) return;
         setBenchSeries([]);
         setBenchLoading(false);
@@ -168,7 +168,6 @@ export default function OverviewTab() {
 
       setBenchLoading(true);
 
-      // Always pull daily benchmark data; we will align/forward-fill to the chart dates
       const raw = await fetchHistoryTicker({
         ticker: "SPY",
         start,
@@ -183,10 +182,9 @@ export default function OverviewTab() {
     }
 
     void runBench();
-  }, [historySeries]);
+  }, [historySeries, showBenchmark]);
 
   const { kpis, chartData, yDomain, updates, riskAlignment, periodLabel } = useMemo(() => {
-    // KPIs: use current positions (user-entered currentPrice) instead of snapshots
     const totalValue = state.positions.reduce((acc, p) => {
       const unit =
         typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
@@ -202,14 +200,12 @@ export default function OverviewTab() {
 
     const unrealized = totalValue - totalCost;
 
-    // Since-start gains (baseline uses first available point in historical series when possible)
     const baseline = historySeries.length ? historySeries[0].value : 0;
     const lastHist = historySeries.length ? historySeries.at(-1)!.value : 0;
 
     const sinceStartDollar = baseline > 0 ? lastHist - baseline : 0;
     const sinceStartPercent = baseline > 0 ? (sinceStartDollar / baseline) * 100 : 0;
 
-    // 1-period change: use last 2 history points at selected interval
     const periodChange =
       historySeries.length >= 2
         ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) /
@@ -217,28 +213,17 @@ export default function OverviewTab() {
           100
         : 0;
 
-    // Benchmark mapping date -> close (daily trading days)
-    const benchMap = new Map<string, number>();
-    for (const p of benchSeries) benchMap.set(p.date, p.close);
-
-    // Benchmark baseline close (first available close on/after start, using forward-fill logic)
-    // We'll find the first benchmark close we can use.
-    const benchDatesSorted = benchSeries.map((x) => x.date).sort();
-    const benchFirstClose = benchDatesSorted.length
-      ? benchMap.get(benchDatesSorted[0]) ?? 0
-      : 0;
-
-    // Build chart series aligned to portfolio dates.
-    // For benchmark on a given portfolio date:
-    // - use last benchmark close <= that date (forward-fill)
     const baseForPct = baseline > 0 ? baseline : 0;
 
+    // Benchmark baseline close (first available)
+    const benchArr = benchSeries.slice().sort((a, b) => a.date.localeCompare(b.date));
+    const benchFirstClose = benchArr.length ? benchArr[0].close : 0;
+
+    // align benchmark closes to portfolio dates via forward-fill
     let lastBenchClose: number | undefined = undefined;
     let benchIdx = 0;
-    const benchArr = benchSeries.slice().sort((a, b) => a.date.localeCompare(b.date));
 
     const aligned = historySeries.map((p) => {
-      // advance benchmark pointer up to current portfolio date
       while (benchIdx < benchArr.length && benchArr[benchIdx].date <= p.date) {
         lastBenchClose = benchArr[benchIdx].close;
         benchIdx++;
@@ -247,22 +232,20 @@ export default function OverviewTab() {
       const dollar = Number(p.value.toFixed(2));
       const percent = baseForPct > 0 ? Number((((p.value / baseForPct) - 1) * 100).toFixed(4)) : 0;
 
-      // Benchmark value:
-      // - % mode: benchmark return %
-      // - $ mode: benchmark "indexed" to portfolio baseline dollars
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
       const benchReturnPct =
-        benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
+        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
 
       const benchIndexedDollar =
-        benchClose && benchFirstClose > 0 && baseline > 0 ? baseline * (benchClose / benchFirstClose) : 0;
+        showBenchmark && benchClose && benchFirstClose > 0 && baseline > 0 ? baseline * (benchClose / benchFirstClose) : 0;
 
-      const benchValue = mode === "dollar" ? Number(benchIndexedDollar.toFixed(2)) : Number(benchReturnPct.toFixed(4));
+      const benchValue =
+        mode === "dollar" ? Number(benchIndexedDollar.toFixed(2)) : Number(benchReturnPct.toFixed(4));
 
       return {
         d: p.date,
-        v: mode === "dollar" ? dollar : percent, // portfolio
-        b: benchValue, // benchmark
+        v: mode === "dollar" ? dollar : percent,
+        b: benchValue,
         breakdown: p.breakdown ?? {},
         totalDollar: dollar,
         benchDollar: Number(benchIndexedDollar.toFixed(2)),
@@ -270,8 +253,11 @@ export default function OverviewTab() {
       };
     });
 
-    // Tight Y-axis domain (zoom in) using both portfolio + benchmark
-    const vals = aligned.flatMap((d) => [d.v, d.b]).filter((n) => Number.isFinite(n));
+    // Domain uses benchmark too only if enabled
+    const vals = aligned
+      .flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v]))
+      .filter((n) => Number.isFinite(n));
+
     const yMin = vals.length ? Math.min(...vals) : 0;
     const yMax = vals.length ? Math.max(...vals) : 0;
     const range = yMax - yMin;
@@ -285,7 +271,6 @@ export default function OverviewTab() {
 
     const yDomain: [number, number] = [yMin - pad, yMax + pad];
 
-    // Risk alignment
     const totals = state.positions.reduce(
       (acc, p) => {
         const v =
@@ -340,7 +325,7 @@ export default function OverviewTab() {
       riskAlignment: alignmentText,
       periodLabel,
     };
-  }, [state.positions, state.profile?.riskLevel, diversificationScore, historySeries, res, mode, benchSeries]);
+  }, [state.positions, state.profile?.riskLevel, diversificationScore, historySeries, res, mode, benchSeries, showBenchmark]);
 
   return (
     <div className="space-y-4">
@@ -393,16 +378,29 @@ export default function OverviewTab() {
 
       {/* Controls */}
       <div className="flex items-center justify-between gap-3">
-        <div className="flex gap-2">
-          <Button variant={res === "daily" ? "default" : "secondary"} onClick={() => setRes("daily")}>
-            Daily
-          </Button>
-          <Button variant={res === "weekly" ? "default" : "secondary"} onClick={() => setRes("weekly")}>
-            Weekly
-          </Button>
-          <Button variant={res === "monthly" ? "default" : "secondary"} onClick={() => setRes("monthly")}>
-            Monthly
-          </Button>
+        <div className="flex items-center gap-3">
+          <div className="flex gap-2">
+            <Button variant={res === "daily" ? "default" : "secondary"} onClick={() => setRes("daily")}>
+              Daily
+            </Button>
+            <Button variant={res === "weekly" ? "default" : "secondary"} onClick={() => setRes("weekly")}>
+              Weekly
+            </Button>
+            <Button variant={res === "monthly" ? "default" : "secondary"} onClick={() => setRes("monthly")}>
+              Monthly
+            </Button>
+          </div>
+
+          {/* ✅ Checkbox between Monthly and $ */}
+          <label className="flex items-center gap-2 text-sm text-gray-700 select-none">
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={showBenchmark}
+              onChange={(e) => setShowBenchmark(e.target.checked)}
+            />
+            S&amp;P 500
+          </label>
         </div>
 
         <div className="flex gap-2 items-center">
@@ -438,7 +436,6 @@ export default function OverviewTab() {
                   tickFormatter={(v: number) => (mode === "dollar" ? fmtDollar(v) : `${v.toFixed(1)}%`)}
                 />
 
-                {/* Tooltip w/ breakdown + benchmark */}
                 <ReTooltip
                   content={({ active, payload }) => {
                     if (!active || !payload?.length) return null;
@@ -453,7 +450,6 @@ export default function OverviewTab() {
                       benchPct: number;
                     };
 
-                    // Sort breakdown biggest -> smallest, keep Cash at bottom if present
                     const entries = Object.entries(point.breakdown || {});
                     entries.sort((a, b) => b[1] - a[1]);
                     const cashIdx = entries.findIndex(([k]) => k === "Cash");
@@ -473,12 +469,15 @@ export default function OverviewTab() {
                               {mode === "dollar" ? fmtDollar(point.totalDollar) : fmtPct(point.v)}
                             </span>
                           </div>
-                          <div className="flex justify-between gap-6">
-                            <span className="text-gray-600">S&amp;P 500 (SPY)</span>
-                            <span className="font-semibold">
-                              {mode === "dollar" ? fmtDollar(point.benchDollar) : fmtPct(point.benchPct)}
-                            </span>
-                          </div>
+
+                          {showBenchmark && (
+                            <div className="flex justify-between gap-6">
+                              <span className="text-gray-600">S&amp;P 500 (SPY)</span>
+                              <span className="font-semibold">
+                                {mode === "dollar" ? fmtDollar(point.benchDollar) : fmtPct(point.benchPct)}
+                              </span>
+                            </div>
+                          )}
                         </div>
 
                         {mode === "dollar" && entries.length > 0 && (
@@ -506,21 +505,22 @@ export default function OverviewTab() {
                 <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2} dot={false} />
 
                 {/* Benchmark line (dashed) */}
-                <Line
-                  type="monotone"
-                  dataKey="b"
-                  stroke="#111827"
-                  strokeWidth={2}
-                  strokeDasharray="6 6"
-                  dot={false}
-                  isAnimationActive={false}
-                />
+                {showBenchmark && (
+                  <Line
+                    type="monotone"
+                    dataKey="b"
+                    stroke="#111827"
+                    strokeWidth={2}
+                    strokeDasharray="6 6"
+                    dot={false}
+                    isAnimationActive={false}
+                  />
+                )}
               </LineChart>
             </ResponsiveContainer>
           )}
 
-          {/* Optional tiny status text */}
-          {benchLoading && (
+          {showBenchmark && benchLoading && (
             <p className="mt-2 text-xs text-gray-500">Loading benchmark (SPY)…</p>
           )}
         </CardContent>
