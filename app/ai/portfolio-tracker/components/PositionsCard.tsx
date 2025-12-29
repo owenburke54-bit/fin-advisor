@@ -68,7 +68,6 @@ export default function PositionsCard() {
   const [importErrs, setImportErrs] = useState<string[]>([]);
 
   const hasPositions = state.positions.length > 0;
-
   const totalPositions = state.positions.length;
 
   const sortedPositions = useMemo(() => {
@@ -305,13 +304,21 @@ export default function PositionsCard() {
 
               <div>
                 <label className="block text-sm mb-1">Purchase price ($)</label>
-                <Input type="number" value={form.costBasisPerUnit || 1} onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })} />
+                <Input
+                  type="number"
+                  value={form.costBasisPerUnit || 1}
+                  onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })}
+                />
                 <p className="text-xs text-gray-600 mt-1">Usually $1.00 for money markets.</p>
               </div>
 
               <div>
                 <label className="block text-sm mb-1">Current price ($)</label>
-                <Input type="number" value={form.currentPrice ?? 1} onChange={(e) => setForm({ ...form, currentPrice: Number(e.target.value) })} />
+                <Input
+                  type="number"
+                  value={form.currentPrice ?? 1}
+                  onChange={(e) => setForm({ ...form, currentPrice: Number(e.target.value) })}
+                />
               </div>
             </>
           ) : (
@@ -324,7 +331,11 @@ export default function PositionsCard() {
 
               <div>
                 <label className="block text-sm mb-1">Cost basis / unit ($)</label>
-                <Input type="number" value={form.costBasisPerUnit} onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })} />
+                <Input
+                  type="number"
+                  value={form.costBasisPerUnit}
+                  onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })}
+                />
                 {errors.costBasisPerUnit && <p className="text-xs text-red-600 mt-1">{errors.costBasisPerUnit}</p>}
               </div>
 
@@ -367,9 +378,7 @@ export default function PositionsCard() {
           />
 
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <div className="text-xs text-gray-600">
-              Tip: If you import the wrong file, use “Delete all” to start fresh.
-            </div>
+            <div className="text-xs text-gray-600">Tip: If you import the wrong file, use “Delete all” to start fresh.</div>
 
             <div className="flex gap-2">
               <Button variant="secondary" onClick={handleImportCSV}>
@@ -398,18 +407,21 @@ export default function PositionsCard() {
           )}
         </div>
 
-        {/* Table (no horizontal scroll; responsive columns) */}
+        {/* Table (FIXED: no letter-stacking, normal row height, responsive) */}
         <div className="w-full">
           <div className="flex items-center justify-between mb-2">
             <p className="text-sm text-gray-600">{totalPositions} positions</p>
           </div>
 
-          <div className="w-full">
-            <table className="w-full table-fixed text-sm">
+          {/* Allow overflow only if truly needed */}
+          <div className="w-full overflow-x-auto">
+            <table className="w-full text-sm table-auto">
               <thead>
-                <tr className="text-left text-gray-500">
-                  <th className="px-2 py-2 w-[72px]">Ticker</th>
-                  <th className="px-2 py-2">Name</th>
+                <tr className="text-left text-gray-500 border-b">
+                  <th className="px-2 py-2 w-[80px]">Ticker</th>
+
+                  {/* Give Name enough width so it can't collapse into vertical characters */}
+                  <th className="px-2 py-2 min-w-[240px]">Name</th>
 
                   <th className="px-2 py-2 hidden md:table-cell w-[110px]">Asset</th>
                   <th className="px-2 py-2 hidden lg:table-cell w-[140px]">Account</th>
@@ -419,7 +431,7 @@ export default function PositionsCard() {
                   <th className="px-2 py-2 text-right hidden lg:table-cell w-[110px]">Current</th>
 
                   <th className="px-2 py-2 text-right w-[110px]">Value</th>
-                  <th className="px-2 py-2 text-right hidden sm:table-cell w-[110px]">P/L</th>
+                  <th className="px-2 py-2 text-right hidden sm:table-cell w-[120px]">P/L</th>
 
                   <th className="px-2 py-2 text-right w-[170px]">Actions</th>
                 </tr>
@@ -440,43 +452,42 @@ export default function PositionsCard() {
                     const plPct = costTotal > 0 ? (plDollar / costTotal) * 100 : 0;
 
                     return (
-                      <tr key={p.id} className="border-t align-top">
-                        <td className="px-2 py-3 font-semibold text-gray-900">{p.ticker}</td>
+                      <tr key={p.id} className="border-b align-top">
+                        <td className="px-2 py-3 font-semibold text-gray-900 whitespace-nowrap">{p.ticker}</td>
 
+                        {/* KEY FIX: prevent character-by-character wrapping */}
                         <td className="px-2 py-3">
                           <div className="min-w-0">
-                            <div className="font-medium text-gray-900 break-words">{p.name}</div>
+                            <div className="font-medium text-gray-900 whitespace-normal break-words leading-snug">
+                              {p.name}
+                            </div>
 
-                            {/* Mobile compact meta line */}
+                            {/* Mobile compact meta */}
                             <div className="mt-1 text-xs text-gray-500 md:hidden">
-                              {p.assetClass}
-                              {" • "}
-                              {p.accountType}
-                              {" • "}
-                              Qty {fmtQty(p.quantity)}
+                              {p.assetClass} • {p.accountType} • Qty {fmtQty(p.quantity)}
                             </div>
                           </div>
                         </td>
 
-                        <td className="px-2 py-3 hidden md:table-cell">{p.assetClass}</td>
-                        <td className="px-2 py-3 hidden lg:table-cell">{p.accountType}</td>
+                        <td className="px-2 py-3 hidden md:table-cell whitespace-nowrap">{p.assetClass}</td>
+                        <td className="px-2 py-3 hidden lg:table-cell whitespace-nowrap">{p.accountType}</td>
 
-                        <td className="px-2 py-3 text-right hidden md:table-cell">{fmtQty(p.quantity)}</td>
-                        <td className="px-2 py-3 text-right hidden md:table-cell">{fmtDollar(p.costBasisPerUnit)}</td>
-                        <td className="px-2 py-3 text-right hidden lg:table-cell">
+                        <td className="px-2 py-3 text-right hidden md:table-cell whitespace-nowrap">{fmtQty(p.quantity)}</td>
+                        <td className="px-2 py-3 text-right hidden md:table-cell whitespace-nowrap">{fmtDollar(p.costBasisPerUnit)}</td>
+                        <td className="px-2 py-3 text-right hidden lg:table-cell whitespace-nowrap">
                           {typeof p.currentPrice === "number" ? fmtDollar(p.currentPrice) : "—"}
                         </td>
 
-                        <td className="px-2 py-3 text-right font-medium">{fmtDollar(value)}</td>
+                        <td className="px-2 py-3 text-right font-medium whitespace-nowrap">{fmtDollar(value)}</td>
 
                         <td
-                          className={`px-2 py-3 text-right hidden sm:table-cell ${
+                          className={`px-2 py-3 text-right hidden sm:table-cell whitespace-nowrap ${
                             plDollar >= 0 ? "text-emerald-600" : "text-red-600"
                           }`}
                         >
                           <div className="font-medium">
-                            {plDollar >= 0 ? "+" : ""}
-                            {fmtDollar(plDollar).replace("$-", "-$")}
+                            {plDollar >= 0 ? "+" : "-"}
+                            {fmtDollar(Math.abs(plDollar))}
                           </div>
                           <div className="text-xs">
                             {plPct >= 0 ? "+" : ""}
@@ -485,7 +496,7 @@ export default function PositionsCard() {
                         </td>
 
                         <td className="px-2 py-3">
-                          <div className="flex justify-end gap-2">
+                          <div className="flex justify-end gap-2 whitespace-nowrap">
                             <Button variant="secondary" onClick={() => startEdit(p)}>
                               Edit
                             </Button>
@@ -494,11 +505,11 @@ export default function PositionsCard() {
                             </Button>
                           </div>
 
-                          {/* Mobile P/L shown under actions (since column hidden) */}
+                          {/* Mobile P/L (since column hidden) */}
                           <div className="sm:hidden mt-2 text-right text-xs">
                             <span className={plDollar >= 0 ? "text-emerald-600 font-medium" : "text-red-600 font-medium"}>
-                              {plDollar >= 0 ? "+" : ""}
-                              {fmtDollar(plDollar).replace("$-", "-$")}
+                              {plDollar >= 0 ? "+" : "-"}
+                              {fmtDollar(Math.abs(plDollar))}
                             </span>{" "}
                             <span className="text-gray-500">
                               ({plPct >= 0 ? "+" : ""}
@@ -577,12 +588,20 @@ export default function PositionsCard() {
 
                   <div>
                     <label className="block text-sm mb-1">Purchase price ($)</label>
-                    <Input type="number" value={editing.costBasisPerUnit || 1} onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })} />
+                    <Input
+                      type="number"
+                      value={editing.costBasisPerUnit || 1}
+                      onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })}
+                    />
                   </div>
 
                   <div>
                     <label className="block text-sm mb-1">Current price ($)</label>
-                    <Input type="number" value={editing.currentPrice ?? 1} onChange={(e) => setEditing({ ...editing, currentPrice: Number(e.target.value) })} />
+                    <Input
+                      type="number"
+                      value={editing.currentPrice ?? 1}
+                      onChange={(e) => setEditing({ ...editing, currentPrice: Number(e.target.value) })}
+                    />
                   </div>
                 </>
               ) : (
