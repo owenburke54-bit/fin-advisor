@@ -17,8 +17,8 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 
-type Resolution = "daily" | "weekly" | "monthly";
 type ChartMode = "dollar" | "percent";
+type Timeframe = "all" | "1m" | "1y";
 
 type HistoryPoint = { date: string; close: number };
 type HistoryResponse = {
@@ -49,6 +49,16 @@ function formatTooltipDate(iso: string) {
     day: "numeric",
     year: "numeric",
   });
+}
+
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function addDaysISO(iso: string, days: number) {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
 }
 
 async function fetchHistoryTicker(opts: {
@@ -86,12 +96,52 @@ async function fetchHistoryTicker(opts: {
   }
 }
 
+/** Pill-style timeframe selector like your screenshot */
+function TimeframePills(props: {
+  value: Timeframe;
+  onChange: (v: Timeframe) => void;
+}) {
+  const { value, onChange } = props;
+
+  const pillBase =
+    "px-4 py-2 rounded-full text-sm font-semibold transition border";
+  const active =
+    "bg-black text-white border-black";
+  const inactive =
+    "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200";
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        className={`${pillBase} ${value === "all" ? active : inactive}`}
+        onClick={() => onChange("all")}
+      >
+        All
+      </button>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1m" ? active : inactive}`}
+        onClick={() => onChange("1m")}
+      >
+        1M
+      </button>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1y" ? active : inactive}`}
+        onClick={() => onChange("1y")}
+      >
+        1Y
+      </button>
+    </div>
+  );
+}
+
 export default function OverviewTab() {
   const { state, diversificationScore } = usePortfolioState();
-  const [res, setRes] = useState<Resolution>("daily");
-  const [mode, setMode] = useState<ChartMode>("dollar");
 
-  // ✅ NEW: toggle for showing benchmark line
+  const [mode, setMode] = useState<ChartMode>("dollar");
+  const [timeframe, setTimeframe] = useState<Timeframe>("all");
   const [showBenchmark, setShowBenchmark] = useState(true);
 
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -112,6 +162,7 @@ export default function OverviewTab() {
   const reqIdRef = useRef(0);
   const benchReqIdRef = useRef(0);
 
+  // Fetch portfolio history (we keep it daily + full range; timeframe filtering happens client-side)
   useEffect(() => {
     const reqId = ++reqIdRef.current;
 
@@ -128,12 +179,10 @@ export default function OverviewTab() {
       setHistoryError(null);
 
       try {
-        const interval = res === "daily" ? "1d" : res === "weekly" ? "1wk" : "1mo";
-
         const series = await fetchPortfolioSeries({
           positions: state.positions,
           profile: state.profile,
-          interval,
+          interval: "1d",
         });
 
         if (reqId !== reqIdRef.current) return;
@@ -149,22 +198,45 @@ export default function OverviewTab() {
     }
 
     void run();
-  }, [state.positions, state.profile, res, reloadNonce]);
+  }, [state.positions, state.profile, reloadNonce]);
 
-  // ✅ Fetch benchmark only when toggle is ON
+  // Compute the cutoff date for timeframe
+  const cutoffISO = useMemo(() => {
+    const end = todayISO();
+    if (timeframe === "1m") return addDaysISO(end, -30);
+    if (timeframe === "1y") return addDaysISO(end, -365);
+    return undefined;
+  }, [timeframe]);
+
+  // Filtered portfolio series for the chart
+  const filteredHistorySeries = useMemo(() => {
+    if (!cutoffISO) return historySeries;
+
+    const filtered = historySeries.filter((p) => p.date >= cutoffISO);
+
+    // Ensure at least 2 points (chart/tooltip needs it)
+    if (filtered.length >= 2) return filtered;
+
+    // fallback: take last 2 points from full series
+    if (historySeries.length >= 2) return historySeries.slice(-2);
+
+    return filtered;
+  }, [historySeries, cutoffISO]);
+
+  // Fetch benchmark ONLY when enabled and based on filtered range
   useEffect(() => {
     const benchReqId = ++benchReqIdRef.current;
 
     async function runBench() {
-      if (!showBenchmark || historySeries.length < 2) {
+      if (!showBenchmark || filteredHistorySeries.length < 2) {
         if (benchReqId !== benchReqIdRef.current) return;
         setBenchSeries([]);
         setBenchLoading(false);
         return;
       }
 
-      const start = historySeries[0].date;
-      const end = historySeries[historySeries.length - 1].date;
+      const start = filteredHistorySeries[0].date;
+      const end = filteredHistorySeries[filteredHistorySeries.length - 1].date;
 
       setBenchLoading(true);
 
@@ -182,9 +254,10 @@ export default function OverviewTab() {
     }
 
     void runBench();
-  }, [historySeries, showBenchmark]);
+  }, [filteredHistorySeries, showBenchmark]);
 
   const { kpis, chartData, yDomain, updates, riskAlignment, periodLabel } = useMemo(() => {
+    // KPIs: use current positions (user-entered currentPrice)
     const totalValue = state.positions.reduce((acc, p) => {
       const unit =
         typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
@@ -200,12 +273,13 @@ export default function OverviewTab() {
 
     const unrealized = totalValue - totalCost;
 
-    const baseline = historySeries.length ? historySeries[0].value : 0;
-    const lastHist = historySeries.length ? historySeries.at(-1)!.value : 0;
+    // For "Since Start" KPI: always use full history start, not filtered timeframe
+    const fullBaseline = historySeries.length ? historySeries[0].value : 0;
+    const fullLast = historySeries.length ? historySeries.at(-1)!.value : 0;
+    const sinceStartDollar = fullBaseline > 0 ? fullLast - fullBaseline : 0;
+    const sinceStartPercent = fullBaseline > 0 ? (sinceStartDollar / fullBaseline) * 100 : 0;
 
-    const sinceStartDollar = baseline > 0 ? lastHist - baseline : 0;
-    const sinceStartPercent = baseline > 0 ? (sinceStartDollar / baseline) * 100 : 0;
-
+    // Period change always uses most recent 2 points in FULL history (1-day-ish)
     const periodChange =
       historySeries.length >= 2
         ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) /
@@ -213,47 +287,47 @@ export default function OverviewTab() {
           100
         : 0;
 
-    const baseForPct = baseline > 0 ? baseline : 0;
+    // For chart percent mode baseline: use filtered chart baseline (so 1M/1Y resets)
+    const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
 
-    // Benchmark baseline close (first available)
+    // Benchmark alignment
     const benchArr = benchSeries.slice().sort((a, b) => a.date.localeCompare(b.date));
     const benchFirstClose = benchArr.length ? benchArr[0].close : 0;
 
-    // align benchmark closes to portfolio dates via forward-fill
     let lastBenchClose: number | undefined = undefined;
     let benchIdx = 0;
 
-    const aligned = historySeries.map((p) => {
+    const aligned = filteredHistorySeries.map((p) => {
       while (benchIdx < benchArr.length && benchArr[benchIdx].date <= p.date) {
         lastBenchClose = benchArr[benchIdx].close;
         benchIdx++;
       }
 
-      const dollar = Number(p.value.toFixed(2));
-      const percent = baseForPct > 0 ? Number((((p.value / baseForPct) - 1) * 100).toFixed(4)) : 0;
+      const portfolioDollar = Number(p.value.toFixed(2));
+      const portfolioPct =
+        chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchReturnPct =
+      const benchPct =
         showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
 
-      const benchIndexedDollar =
-        showBenchmark && benchClose && benchFirstClose > 0 && baseline > 0 ? baseline * (benchClose / benchFirstClose) : 0;
-
-      const benchValue =
-        mode === "dollar" ? Number(benchIndexedDollar.toFixed(2)) : Number(benchReturnPct.toFixed(4));
+      const benchDollarIndexed =
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
+          ? chartBaseline * (benchClose / benchFirstClose)
+          : 0;
 
       return {
         d: p.date,
-        v: mode === "dollar" ? dollar : percent,
-        b: benchValue,
+        v: mode === "dollar" ? portfolioDollar : portfolioPct,
+        b: mode === "dollar" ? Number(benchDollarIndexed.toFixed(2)) : Number(benchPct.toFixed(4)),
         breakdown: p.breakdown ?? {},
-        totalDollar: dollar,
-        benchDollar: Number(benchIndexedDollar.toFixed(2)),
-        benchPct: Number(benchReturnPct.toFixed(4)),
+        totalDollar: portfolioDollar,
+        benchDollar: Number(benchDollarIndexed.toFixed(2)),
+        benchPct: Number(benchPct.toFixed(4)),
       };
     });
 
-    // Domain uses benchmark too only if enabled
+    // Domain (include benchmark only if enabled)
     const vals = aligned
       .flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v]))
       .filter((n) => Number.isFinite(n));
@@ -271,6 +345,7 @@ export default function OverviewTab() {
 
     const yDomain: [number, number] = [yMin - pad, yMax + pad];
 
+    // Risk alignment
     const totals = state.positions.reduce(
       (acc, p) => {
         const v =
@@ -304,12 +379,11 @@ export default function OverviewTab() {
       historySeries.length < 2
         ? []
         : [
-            `Latest: Your portfolio ${periodChange >= 0 ? "gained" : "fell"} ${Math.abs(periodChange).toFixed(2)}% (${res}).`,
+            `Latest: Your portfolio ${periodChange >= 0 ? "gained" : "fell"} ${Math.abs(periodChange).toFixed(2)}% (1 day).`,
             `Diversification score: ${diversificationScore}/100.`,
           ];
 
-    const periodLabel =
-      res === "daily" ? "1-Day Change" : res === "weekly" ? "1-Week Change" : "1-Month Change";
+    const periodLabel = "1-Day Change";
 
     return {
       kpis: {
@@ -325,7 +399,16 @@ export default function OverviewTab() {
       riskAlignment: alignmentText,
       periodLabel,
     };
-  }, [state.positions, state.profile?.riskLevel, diversificationScore, historySeries, res, mode, benchSeries, showBenchmark]);
+  }, [
+    state.positions,
+    state.profile?.riskLevel,
+    diversificationScore,
+    historySeries,
+    filteredHistorySeries,
+    mode,
+    benchSeries,
+    showBenchmark,
+  ]);
 
   return (
     <div className="space-y-4">
@@ -378,20 +461,11 @@ export default function OverviewTab() {
 
       {/* Controls */}
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex gap-2">
-            <Button variant={res === "daily" ? "default" : "secondary"} onClick={() => setRes("daily")}>
-              Daily
-            </Button>
-            <Button variant={res === "weekly" ? "default" : "secondary"} onClick={() => setRes("weekly")}>
-              Weekly
-            </Button>
-            <Button variant={res === "monthly" ? "default" : "secondary"} onClick={() => setRes("monthly")}>
-              Monthly
-            </Button>
-          </div>
+        <div className="flex items-center gap-4">
+          {/* ✅ New timeframe selector (All / 1M / 1Y) */}
+          <TimeframePills value={timeframe} onChange={setTimeframe} />
 
-          {/* ✅ Checkbox between Monthly and $ */}
+          {/* ✅ Benchmark checkbox between timeframe pills and $ */}
           <label className="flex items-center gap-2 text-sm text-gray-700 select-none">
             <input
               type="checkbox"
