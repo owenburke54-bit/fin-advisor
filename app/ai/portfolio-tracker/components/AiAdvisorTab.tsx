@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { usePortfolioState } from "@/lib/usePortfolioState";
@@ -13,25 +13,35 @@ export default function AiAdvisorTab() {
 
   const snapshot = state.snapshots.at(-1) ?? null;
 
+  const hasProfile = !!state.profile;
+  const hasPositions = state.positions.length > 0;
+
   const currentMix = useMemo(() => {
     const totals = state.positions.reduce(
       (acc, p) => {
-        const v = (p.currentPrice ?? p.costBasisPerUnit) * p.quantity;
+        const unit =
+          typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+            ? p.currentPrice
+            : p.costBasisPerUnit;
+
+        const v = (Number(unit) || 0) * (Number(p.quantity) || 0);
+
         if (isEquityLike(p.assetClass)) acc.equity += v;
         else if (isBondLike(p.assetClass)) acc.bonds += v;
         else if (isCashLike(p.assetClass)) acc.cash += v;
         else acc.equity += v;
+
         acc.total += v;
         return acc;
       },
       { equity: 0, bonds: 0, cash: 0, total: 0 },
     );
-    const pct = {
+
+    return {
       equity: totals.total ? totals.equity / totals.total : 0,
       bonds: totals.total ? totals.bonds / totals.total : 0,
       cash: totals.total ? totals.cash / totals.total : 0,
     };
-    return pct;
   }, [state.positions]);
 
   const target = targetMixForRisk(state.profile?.riskLevel ?? 3);
@@ -39,22 +49,38 @@ export default function AiAdvisorTab() {
   const rebalanceLines = useMemo(() => {
     const lines: string[] = [];
     const format = (n: number) => `${Math.round(n * 100)}%`;
-    lines.push(`Target equity: ${format(target.equity)} — Current: ${format(currentMix.equity)} (${deltaText(currentMix.equity - target.equity)}).`);
-    lines.push(`Target bonds: ${format(target.bonds)} — Current: ${format(currentMix.bonds)} (${deltaText(currentMix.bonds - target.bonds)}).`);
-    lines.push(`Target cash/MM: ${format(target.cash)} — Current: ${format(currentMix.cash)} (${deltaText(currentMix.cash - target.cash)}).`);
+
+    lines.push(
+      `Target equity: ${format(target.equity)} — Current: ${format(currentMix.equity)} (${deltaText(
+        currentMix.equity - target.equity,
+      )}).`,
+    );
+    lines.push(
+      `Target bonds: ${format(target.bonds)} — Current: ${format(currentMix.bonds)} (${deltaText(
+        currentMix.bonds - target.bonds,
+      )}).`,
+    );
+    lines.push(
+      `Target cash/MM: ${format(target.cash)} — Current: ${format(currentMix.cash)} (${deltaText(
+        currentMix.cash - target.cash,
+      )}).`,
+    );
+
     return lines;
   }, [currentMix.equity, currentMix.bonds, currentMix.cash, target.equity, target.bonds, target.cash]);
 
   const regenerate = useCallback(async () => {
-    if (!state.profile) {
-      setMarkdown("Add your profile and positions to generate insights.");
+    if (!hasProfile || !hasPositions) {
+      setMarkdown("Add your profile and at least 1 position to generate insights.");
       return;
     }
+
     setLoading(true);
     try {
       const res = await fetch("/api/ai-advisor", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        cache: "no-store",
         body: JSON.stringify({
           profile: state.profile,
           positions: state.positions,
@@ -62,29 +88,56 @@ export default function AiAdvisorTab() {
           diversificationScore,
         }),
       });
-      const data = await res.json();
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        setMarkdown(
+          `Failed to generate insights (HTTP ${res.status}).${
+            text ? `\n\nDetails:\n${text}` : ""
+          }`,
+        );
+        return;
+      }
+
+      const data = (await res.json()) as { markdown?: string };
       setMarkdown(data.markdown ?? "No insights available.");
-    } catch {
-      setMarkdown("Failed to generate insights. Please try again.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      setMarkdown(`Failed to generate insights. Please try again.\n\nError: ${msg}`);
     } finally {
       setLoading(false);
     }
-  }, [state.profile, state.positions, snapshot, diversificationScore]);
+  }, [hasProfile, hasPositions, state.profile, state.positions, snapshot, diversificationScore]);
+
+  // Optional: auto-generate once after profile + positions exist
+  useEffect(() => {
+    if (!markdown && hasProfile && hasPositions) {
+      void regenerate();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasProfile, hasPositions]);
+
+  const emptyState = !hasProfile
+    ? "Save your profile to unlock AI insights."
+    : !hasPositions
+      ? "Add at least 1 position to unlock AI insights."
+      : 'Click “Regenerate insights” to generate educational guidance.';
 
   return (
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex items-center justify-between">
           <CardTitle>AI Portfolio Insights</CardTitle>
-          <Button onClick={regenerate} disabled={loading}>
+          <Button onClick={regenerate} disabled={loading || !hasProfile || !hasPositions}>
             {loading ? "Generating…" : "Regenerate insights"}
           </Button>
         </CardHeader>
+
         <CardContent>
           {markdown ? (
-            <pre className="whitespace-pre-wrap text-sm">{markdown}</pre>
+            <pre className="whitespace-pre-wrap text-sm leading-6 text-gray-900">{markdown}</pre>
           ) : (
-            <p className="text-sm text-gray-600">Click “Regenerate insights” to generate educational guidance.</p>
+            <p className="text-sm text-gray-600">{emptyState}</p>
           )}
         </CardContent>
       </Card>
@@ -112,4 +165,3 @@ function deltaText(delta: number): string {
   if (pct > 0) return `overweight by ${pct}%`;
   return `underweight by ${Math.abs(pct)}%`;
 }
-

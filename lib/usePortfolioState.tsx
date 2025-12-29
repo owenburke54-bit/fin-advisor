@@ -1,9 +1,9 @@
 "use client";
 
 /* eslint-disable @typescript-eslint/no-empty-function */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { fetchPricesForTickers } from "./marketData";
-import {
+import type {
   PortfolioState,
   Position,
   UserProfile,
@@ -34,7 +34,7 @@ export interface UsePortfolio {
   deletePosition: (id: string) => void;
   clearPositions: () => void;
 
-  // NEW (for later): transactions
+  // transactions
   setTransactions: (txs: Transaction[]) => void;
 
   exportJSON: () => string;
@@ -43,7 +43,9 @@ export interface UsePortfolio {
   importCSV: (csv: string) => { success: boolean; errors: string[] };
 }
 
-export function usePortfolioState(): UsePortfolio {
+const PortfolioContext = createContext<UsePortfolio | null>(null);
+
+function usePortfolioStateImpl(): UsePortfolio {
   const [state, setState] = useState<PortfolioState>(getInitialState());
   const [loading, setLoading] = useState(true);
 
@@ -79,7 +81,6 @@ export function usePortfolioState(): UsePortfolio {
     setState((prev) => withSnapshot({ ...prev, positions: [] }));
   }, []);
 
-  // NEW: allow setting transactions (UI will come later)
   const setTransactions = useCallback((txs: Transaction[]) => {
     setState((prev) => withSnapshot({ ...prev, transactions: txs }));
   }, []);
@@ -88,7 +89,6 @@ export function usePortfolioState(): UsePortfolio {
     async (positionsOverride?: Position[]) => {
       const positionsToUse = positionsOverride ?? state.positions;
 
-      // Normalize tickers
       const tickers = Array.from(
         new Set(
           positionsToUse
@@ -159,7 +159,7 @@ export function usePortfolioState(): UsePortfolio {
         const next: PortfolioState = {
           profile: parsed.profile ?? null,
           positions: parsed.positions ?? [],
-          transactions: parsed.transactions ?? [], // <-- NEW
+          transactions: parsed.transactions ?? [],
           snapshots: state.snapshots, // keep history
           lastUpdated: new Date().toISOString(),
         };
@@ -167,7 +167,7 @@ export function usePortfolioState(): UsePortfolio {
         setState(withSnapshot(next));
         void refreshPrices(next.positions);
       } catch {
-        // ignore here; caller can validate first
+        // ignore
       }
     },
     [state.snapshots, refreshPrices],
@@ -211,12 +211,45 @@ export function usePortfolioState(): UsePortfolio {
     return [header, ...lines].join("\n");
   }, [state.positions]);
 
+  function splitCsvRow(row: string): string[] {
+    const result: string[] = [];
+    let current = "";
+    let inQuotes = false;
+
+    for (let i = 0; i < row.length; i++) {
+      const ch = row[i];
+
+      if (inQuotes) {
+        if (ch === '"' && row[i + 1] === '"') {
+          current += '"';
+          i++;
+        } else if (ch === '"') {
+          inQuotes = false;
+        } else {
+          current += ch;
+        }
+      } else {
+        if (ch === '"') {
+          inQuotes = true;
+        } else if (ch === ",") {
+          result.push(current);
+          current = "";
+        } else {
+          current += ch;
+        }
+      }
+    }
+
+    result.push(current);
+    return result.map((s) => s.trim());
+  }
+
   const importCSV = useCallback(
     (csv: string) => {
       const errors: string[] = [];
 
       const rows = csv
-        .split(/\r?\n/)
+        .split(/\r?\n/))
         .map((r) => r.trim())
         .filter(Boolean);
 
@@ -256,11 +289,7 @@ export function usePortfolioState(): UsePortfolio {
             quantity: Number(obj["quantity"] || 0),
             costBasisPerUnit: Number(obj["costbasisperunit"] || 0),
             currentPrice:
-              Number.isFinite(currentPriceRaw)
-                ? currentPriceRaw
-                : isCashLike
-                  ? 1
-                  : undefined,
+              Number.isFinite(currentPriceRaw) ? currentPriceRaw : isCashLike ? 1 : undefined,
             currency: "USD",
             sector: undefined,
             purchaseDate: header.includes("purchasedate")
@@ -291,8 +320,7 @@ export function usePortfolioState(): UsePortfolio {
             merged.set(key, { ...p });
           } else {
             const totalQty = existing.quantity + p.quantity;
-            const totalCost =
-              existing.costBasisPerUnit * existing.quantity + p.costBasisPerUnit * p.quantity;
+            const totalCost = existing.costBasisPerUnit * existing.quantity + p.costBasisPerUnit * p.quantity;
             const avgCost = totalQty > 0 ? totalCost / totalQty : 0;
 
             merged.set(key, {
@@ -314,8 +342,6 @@ export function usePortfolioState(): UsePortfolio {
         }
 
         const positionsToAdd = Array.from(merged.values());
-
-        // ✅ Put the combined list in a local variable, then use it for BOTH setState and refreshPrices
         const combined = [...state.positions, ...positionsToAdd];
 
         setState((prev) =>
@@ -325,7 +351,6 @@ export function usePortfolioState(): UsePortfolio {
           }),
         );
 
-        // ✅ This is the key fix: refresh against the full set (existing + newly imported)
         void refreshPrices(combined);
       }
 
@@ -334,46 +359,10 @@ export function usePortfolioState(): UsePortfolio {
     [refreshPrices, state.positions],
   );
 
-  function splitCsvRow(row: string): string[] {
-    const result: string[] = [];
-    let current = "";
-    let inQuotes = false;
-
-    for (let i = 0; i < row.length; i++) {
-      const ch = row[i];
-
-      if (inQuotes) {
-        if (ch === '"' && row[i + 1] === '"') {
-          current += '"';
-          i++;
-        } else if (ch === '"') {
-          inQuotes = false;
-        } else {
-          current += ch;
-        }
-      } else {
-        if (ch === '"') {
-          inQuotes = true;
-        } else if (ch === ",") {
-          result.push(current);
-          current = "";
-        } else {
-          current += ch;
-        }
-      }
-    }
-
-    result.push(current);
-    return result.map((s) => s.trim());
-  }
-
   const { diversificationScore, topConcentrations } = useMemo(() => {
     const total = state.positions.reduce((acc, p) => acc + valueForPosition(p), 0);
     if (total <= 0) {
-      return {
-        diversificationScore: 0,
-        topConcentrations: [] as { ticker: string; value: number; percent: number }[],
-      };
+      return { diversificationScore: 0, topConcentrations: [] as { ticker: string; value: number; percent: number }[] };
     }
 
     const byTicker = new Map<string, number>();
@@ -397,10 +386,7 @@ export function usePortfolioState(): UsePortfolio {
     const numTickers = byTicker.size;
     const classBonus = Math.min(classes.size / 5, 1);
 
-    const base =
-      Math.min(numTickers / 12, 1) * 0.4 +
-      (1 - hhi) * 0.4 +
-      classBonus * 0.2;
+    const base = Math.min(numTickers / 12, 1) * 0.4 + (1 - hhi) * 0.4 + classBonus * 0.2;
 
     return {
       diversificationScore: Math.round(base * 100),
@@ -426,4 +412,19 @@ export function usePortfolioState(): UsePortfolio {
     exportCSV,
     importCSV,
   };
+}
+
+/** ✅ Wrap your app/portfolio tracker UI in this provider once */
+export function PortfolioProvider({ children }: { children: React.ReactNode }) {
+  const value = usePortfolioStateImpl();
+  return <PortfolioContext.Provider value={value}>{children}</PortfolioContext.Provider>;
+}
+
+/** ✅ Use this everywhere instead of isolated state */
+export function usePortfolioState(): UsePortfolio {
+  const ctx = useContext(PortfolioContext);
+  if (!ctx) {
+    throw new Error("usePortfolioState must be used inside <PortfolioProvider />");
+  }
+  return ctx;
 }
