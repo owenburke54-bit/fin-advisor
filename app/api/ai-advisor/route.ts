@@ -19,13 +19,13 @@ export async function POST(req: Request) {
   try {
     const body = (await req.json()) as Partial<AdvisorRequest>;
 
-    // Basic validation
     if (!body.profile) {
       return NextResponse.json(
         { markdown: "Missing profile. Please save your profile first." },
         { status: 400 },
       );
     }
+
     if (!Array.isArray(body.positions) || body.positions.length === 0) {
       return NextResponse.json(
         { markdown: "No positions found. Add at least 1 position to generate insights." },
@@ -60,9 +60,6 @@ function buildInsightsMarkdown(req: AdvisorRequest): string {
   const allocation = computeMix(positions);
   const top = topConcentrations(positions, 5);
 
-  // If snapshot isn't present, compute a lightweight one from current prices
-  const computed = snapshot ?? computeSnapshotFromPositions(positions);
-
   const lines: string[] = [];
   lines.push(`# AI Portfolio Insights`);
   lines.push("");
@@ -79,12 +76,15 @@ function buildInsightsMarkdown(req: AdvisorRequest): string {
     )}`,
   );
 
-  if (computed) {
+  // Only show snapshot metrics if caller provided a snapshot (so we don't fight the TS type)
+  if (snapshot) {
     lines.push(
-      `- Portfolio value: $${computed.totalValue.toFixed(
+      `- Portfolio value (snapshot): $${snapshot.totalValue.toFixed(
         2,
-      )}, Unrealized P/L: $${computed.totalGainLossDollar.toFixed(2)} (${computed.totalGainLossPercent.toFixed(2)}%)`,
+      )}, Unrealized P/L: $${snapshot.totalGainLossDollar.toFixed(2)} (${snapshot.totalGainLossPercent.toFixed(2)}%)`,
     );
+  } else {
+    lines.push(`- Portfolio value: (snapshot not available yet — take a snapshot to track this over time)`);
   }
 
   lines.push("");
@@ -121,7 +121,6 @@ function buildInsightsMarkdown(req: AdvisorRequest): string {
   lines.push(`- Do you have exposure across sectors and, if appropriate, international markets?`);
   lines.push(`- Are your contributions consistent with your goal timeline?`);
   lines.push("");
-
   lines.push(
     `> Disclaimer: This content is for educational and informational purposes only and is not financial, investment, or tax advice. No specific securities are recommended.`,
   );
@@ -184,32 +183,6 @@ function topConcentrations(
 
   rows.sort((a, b) => b.percent - a.percent);
   return rows.slice(0, limit);
-}
-
-function computeSnapshotFromPositions(positions: Position[]): PortfolioSnapshot {
-  const totalValue = positions.reduce((acc, p) => {
-    const unit =
-      typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
-        ? p.currentPrice
-        : p.costBasisPerUnit;
-    return acc + (Number(unit) || 0) * (Number(p.quantity) || 0);
-  }, 0);
-
-  const totalCost = positions.reduce((acc, p) => {
-    return acc + (Number(p.costBasisPerUnit) || 0) * (Number(p.quantity) || 0);
-  }, 0);
-
-  const totalGainLossDollar = totalValue - totalCost;
-  const totalGainLossPercent = totalCost > 0 ? (totalGainLossDollar / totalCost) * 100 : 0;
-
-  // Minimal snapshot shape (matches your usage)
-  return {
-    at: new Date().toISOString(),
-    totalValue,
-    totalGainLossDollar,
-    totalGainLossPercent,
-    positions: [],
-  } as PortfolioSnapshot;
 }
 
 function pct(n: number) {
