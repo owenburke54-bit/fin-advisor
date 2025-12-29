@@ -14,7 +14,6 @@ import {
   ResponsiveContainer,
   CartesianGrid,
 } from "recharts";
-import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 
 type ChartMode = "dollar" | "percent";
@@ -97,18 +96,12 @@ async function fetchHistoryTicker(opts: {
 }
 
 /** Pill-style timeframe selector like your screenshot */
-function TimeframePills(props: {
-  value: Timeframe;
-  onChange: (v: Timeframe) => void;
-}) {
+function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => void }) {
   const { value, onChange } = props;
 
-  const pillBase =
-    "px-4 py-2 rounded-full text-sm font-semibold transition border";
-  const active =
-    "bg-black text-white border-black";
-  const inactive =
-    "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200";
+  const pillBase = "px-4 py-2 rounded-full text-sm font-semibold transition border";
+  const active = "bg-black text-white border-black";
+  const inactive = "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200";
 
   return (
     <div className="flex items-center gap-2">
@@ -137,6 +130,41 @@ function TimeframePills(props: {
   );
 }
 
+function MetricCard(props: {
+  title: string;
+  value: React.ReactNode;
+  subValue?: React.ReactNode;
+  badgeText?: string;
+  valueClassName?: string;
+}) {
+  const { title, value, subValue, badgeText, valueClassName } = props;
+
+  return (
+    <Card className="h-full">
+      <CardContent className="p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-gray-600">{title}</p>
+          </div>
+
+          {badgeText ? (
+            <div className="shrink-0 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-700">
+              {badgeText}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="mt-3">
+          <div className={`text-2xl font-semibold tracking-tight text-gray-900 ${valueClassName ?? ""}`}>
+            {value}
+          </div>
+          {subValue ? <div className="mt-1 text-sm text-gray-600">{subValue}</div> : null}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function OverviewTab() {
   const { state, diversificationScore } = usePortfolioState();
 
@@ -162,7 +190,7 @@ export default function OverviewTab() {
   const reqIdRef = useRef(0);
   const benchReqIdRef = useRef(0);
 
-  // Fetch portfolio history (we keep it daily + full range; timeframe filtering happens client-side)
+  // Fetch portfolio history
   useEffect(() => {
     const reqId = ++reqIdRef.current;
 
@@ -200,7 +228,7 @@ export default function OverviewTab() {
     void run();
   }, [state.positions, state.profile, reloadNonce]);
 
-  // Compute the cutoff date for timeframe
+  // Compute cutoff date for timeframe
   const cutoffISO = useMemo(() => {
     const end = todayISO();
     if (timeframe === "1m") return addDaysISO(end, -30);
@@ -214,10 +242,7 @@ export default function OverviewTab() {
 
     const filtered = historySeries.filter((p) => p.date >= cutoffISO);
 
-    // Ensure at least 2 points (chart/tooltip needs it)
     if (filtered.length >= 2) return filtered;
-
-    // fallback: take last 2 points from full series
     if (historySeries.length >= 2) return historySeries.slice(-2);
 
     return filtered;
@@ -256,13 +281,11 @@ export default function OverviewTab() {
     void runBench();
   }, [filteredHistorySeries, showBenchmark]);
 
-  const { kpis, chartData, yDomain, updates, riskAlignment, periodLabel } = useMemo(() => {
+  const { kpis, chartData, yDomain, updates, riskAlignment, periodLabel, killer } = useMemo(() => {
     // KPIs: use current positions (user-entered currentPrice)
     const totalValue = state.positions.reduce((acc, p) => {
       const unit =
-        typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
-          ? p.currentPrice
-          : p.costBasisPerUnit;
+        typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
@@ -273,21 +296,19 @@ export default function OverviewTab() {
 
     const unrealized = totalValue - totalCost;
 
-    // For "Since Start" KPI: always use full history start, not filtered timeframe
+    // Since Start KPI: always use full history start
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
     const fullLast = historySeries.length ? historySeries.at(-1)!.value : 0;
     const sinceStartDollar = fullBaseline > 0 ? fullLast - fullBaseline : 0;
     const sinceStartPercent = fullBaseline > 0 ? (sinceStartDollar / fullBaseline) * 100 : 0;
 
-    // Period change always uses most recent 2 points in FULL history (1-day-ish)
+    // 1-day change based on last 2 points in FULL history
     const periodChange =
       historySeries.length >= 2
-        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) /
-            Math.max(historySeries.at(-2)!.value, 1)) *
-          100
+        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) / Math.max(historySeries.at(-2)!.value, 1)) * 100
         : 0;
 
-    // For chart percent mode baseline: use filtered chart baseline (so 1M/1Y resets)
+    // Chart baseline: use filtered chart baseline so 1M/1Y resets
     const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
 
     // Benchmark alignment
@@ -304,17 +325,13 @@ export default function OverviewTab() {
       }
 
       const portfolioDollar = Number(p.value.toFixed(2));
-      const portfolioPct =
-        chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
+      const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct =
-        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
+      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
-          ? chartBaseline * (benchClose / benchFirstClose)
-          : 0;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : 0;
 
       return {
         d: p.date,
@@ -327,11 +344,8 @@ export default function OverviewTab() {
       };
     });
 
-    // Domain (include benchmark only if enabled)
-    const vals = aligned
-      .flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v]))
-      .filter((n) => Number.isFinite(n));
-
+    // Domain
+    const vals = aligned.flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v])).filter((n) => Number.isFinite(n));
     const yMin = vals.length ? Math.min(...vals) : 0;
     const yMax = vals.length ? Math.max(...vals) : 0;
     const range = yMax - yMin;
@@ -348,8 +362,7 @@ export default function OverviewTab() {
     // Risk alignment
     const totals = state.positions.reduce(
       (acc, p) => {
-        const v =
-          (typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit) * p.quantity;
+        const v = (typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit) * p.quantity;
 
         if (isEquityLike(p.assetClass)) acc.equity += v;
         else if (isBondLike(p.assetClass)) acc.bonds += v;
@@ -362,9 +375,7 @@ export default function OverviewTab() {
     );
 
     const target = targetMixForRisk(state.profile?.riskLevel ?? 3);
-    const deltaEquity = totals.total
-      ? Math.round(((totals.equity / totals.total) - target.equity) * 100)
-      : 0;
+    const deltaEquity = totals.total ? Math.round(((totals.equity / totals.total) - target.equity) * 100) : 0;
 
     const alignmentText =
       totals.total === 0
@@ -383,6 +394,33 @@ export default function OverviewTab() {
             `Diversification score: ${diversificationScore}/100.`,
           ];
 
+    // Killer insight: biggest unrealized contributor
+    const killer = (() => {
+      if (!state.positions.length) return null;
+
+      const rows = state.positions
+        .map((p) => {
+          const current =
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+
+          const cost = Number(p.costBasisPerUnit) || 0;
+          const qty = Number(p.quantity) || 0;
+          const pnl = (current - cost) * qty;
+
+          const value = current * qty;
+          return { ticker: p.ticker, pnl, value };
+        })
+        .filter((r) => r.ticker);
+
+      if (!rows.length) return null;
+
+      rows.sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
+      const top = rows[0];
+
+      const dir = top.pnl >= 0 ? "gain" : "loss";
+      return { ticker: top.ticker, pnl: top.pnl, dir };
+    })();
+
     const periodLabel = "1-Day Change";
 
     return {
@@ -398,6 +436,7 @@ export default function OverviewTab() {
       updates,
       riskAlignment: alignmentText,
       periodLabel,
+      killer,
     };
   }, [
     state.positions,
@@ -413,71 +452,57 @@ export default function OverviewTab() {
   return (
     <div className="space-y-4">
       {/* KPIs */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-gray-500">Total Portfolio Value</CardTitle>
-          </CardHeader>
-          <CardContent className="text-2xl font-semibold">${kpis.totalValue.toFixed(2)}</CardContent>
-        </Card>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard title="Total Portfolio Value" value={`$${kpis.totalValue.toFixed(2)}`} />
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-gray-500">Unrealized Gain/Loss</CardTitle>
-          </CardHeader>
-          <CardContent
-            className={`text-2xl font-semibold ${kpis.unrealized >= 0 ? "text-emerald-600" : "text-red-600"}`}
-          >
-            {kpis.unrealized >= 0 ? "+" : ""}
-            ${kpis.unrealized.toFixed(2)}
-          </CardContent>
-        </Card>
+        <MetricCard
+          title="Unrealized Gain/Loss"
+          value={
+            <>
+              {kpis.unrealized >= 0 ? "+" : ""}
+              ${kpis.unrealized.toFixed(2)}
+            </>
+          }
+          valueClassName={kpis.unrealized >= 0 ? "text-emerald-600" : "text-red-600"}
+        />
 
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-gray-500">Since Start (Gain/Loss)</CardTitle>
-          </CardHeader>
-          <CardContent
-            className={`text-2xl font-semibold ${kpis.sinceStartDollar >= 0 ? "text-emerald-600" : "text-red-600"}`}
-          >
-            {kpis.sinceStartDollar >= 0 ? "+" : ""}
-            ${kpis.sinceStartDollar.toFixed(2)} ({kpis.sinceStartPercent.toFixed(2)}%)
-          </CardContent>
-        </Card>
+        <MetricCard
+          title="Since Start (Gain/Loss)"
+          value={
+            <>
+              {kpis.sinceStartDollar >= 0 ? "+" : ""}
+              ${kpis.sinceStartDollar.toFixed(2)}
+            </>
+          }
+          subValue={`${kpis.sinceStartPercent >= 0 ? "+" : ""}${kpis.sinceStartPercent.toFixed(2)}%`}
+          valueClassName={kpis.sinceStartDollar >= 0 ? "text-emerald-600" : "text-red-600"}
+        />
 
-        <Card>
-          <CardHeader className="pb-2 flex items-center justify-between">
-            <CardTitle className="text-sm text-gray-500">{periodLabel}</CardTitle>
-            <Badge variant="secondary">{riskAlignment}</Badge>
-          </CardHeader>
-          <CardContent
-            className={`text-2xl font-semibold ${kpis.dayChange >= 0 ? "text-emerald-600" : "text-red-600"}`}
-          >
-            {kpis.dayChange >= 0 ? "+" : ""}
-            {kpis.dayChange.toFixed(2)}%
-          </CardContent>
-        </Card>
+        <MetricCard
+          title={periodLabel}
+          value={`${kpis.dayChange >= 0 ? "+" : ""}${kpis.dayChange.toFixed(2)}%`}
+          valueClassName={kpis.dayChange >= 0 ? "text-emerald-600" : "text-red-600"}
+          badgeText={riskAlignment}
+        />
       </div>
 
       {/* Controls */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-4">
-          {/* ✅ New timeframe selector (All / 1M / 1Y) */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <TimeframePills value={timeframe} onChange={setTimeframe} />
 
-          {/* ✅ Benchmark checkbox between timeframe pills and $ */}
-          <label className="flex items-center gap-2 text-sm text-gray-700 select-none">
+          <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-2 text-sm text-gray-700 select-none">
             <input
               type="checkbox"
               className="h-4 w-4"
               checked={showBenchmark}
               onChange={(e) => setShowBenchmark(e.target.checked)}
             />
-            S&amp;P 500
+            <span className="font-medium">S&amp;P 500</span>
           </label>
         </div>
 
-        <div className="flex gap-2 items-center">
+        <div className="flex flex-wrap items-center gap-2">
           <Button variant={mode === "dollar" ? "default" : "secondary"} onClick={() => setMode("dollar")}>
             $
           </Button>
@@ -594,8 +619,29 @@ export default function OverviewTab() {
             </ResponsiveContainer>
           )}
 
-          {showBenchmark && benchLoading && (
-            <p className="mt-2 text-xs text-gray-500">Loading benchmark (SPY)…</p>
+          {showBenchmark && benchLoading && <p className="mt-2 text-xs text-gray-500">Loading benchmark (SPY)…</p>}
+        </CardContent>
+      </Card>
+
+      {/* Killer Insight */}
+      <Card>
+        <CardContent className="p-5">
+          <div className="text-sm font-medium text-gray-600">Killer Insight</div>
+
+          {killer ? (
+            <div className="mt-2 text-sm text-gray-900">
+              <span className="font-semibold">{killer.ticker}</span> is your biggest driver of{" "}
+              {killer.dir} right now (
+              <span className={killer.pnl >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
+                {killer.pnl >= 0 ? "+" : ""}${killer.pnl.toFixed(2)}
+              </span>
+              ).{" "}
+              <span className="text-gray-600">
+                If you want a smoother ride, reduce single-name concentration over time.
+              </span>
+            </div>
+          ) : (
+            <div className="mt-2 text-sm text-gray-600">Add positions to see your biggest return driver.</div>
           )}
         </CardContent>
       </Card>
