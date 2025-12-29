@@ -249,7 +249,7 @@ function usePortfolioStateImpl(): UsePortfolio {
       const errors: string[] = [];
 
       const rows = csv
-        .split(/\r?\n/))
+        .split(/\r?\n/)
         .map((r) => r.trim())
         .filter(Boolean);
 
@@ -414,13 +414,13 @@ function usePortfolioStateImpl(): UsePortfolio {
   };
 }
 
-/** ✅ Wrap your app/portfolio tracker UI in this provider once */
+/** Wrap your app/portfolio tracker UI in this provider once */
 export function PortfolioProvider({ children }: { children: React.ReactNode }) {
   const value = usePortfolioStateImpl();
   return <PortfolioContext.Provider value={value}>{children}</PortfolioContext.Provider>;
 }
 
-/** ✅ Use this everywhere instead of isolated state */
+/** Use this everywhere instead of isolated state */
 export function usePortfolioState(): UsePortfolio {
   const ctx = useContext(PortfolioContext);
   if (!ctx) {
