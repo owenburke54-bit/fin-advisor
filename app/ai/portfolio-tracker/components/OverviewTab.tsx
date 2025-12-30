@@ -7,6 +7,12 @@ import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
 import { fmtMoney, fmtNumber } from "@/lib/format";
 import {
+  cashFlowsFromTransactions,
+  twr,
+  xirr,
+  xirrCashFlowsWithTerminalValue,
+} from "@/lib/performance";
+import {
   LineChart,
   Line,
   XAxis,
@@ -34,7 +40,10 @@ function fmtSignedPct(n: number, decimals = 2) {
 }
 
 function formatAxisDate(iso: string) {
-  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function formatTooltipDate(iso: string) {
@@ -82,7 +91,9 @@ async function fetchHistoryTicker(opts: {
     if (!res.ok) return [];
 
     const json = (await res.json()) as HistoryResponse;
-    const series = (json?.data?.[ticker] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
+    const series = (json?.data?.[ticker] ?? [])
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date));
     return series;
   } catch {
     return [];
@@ -100,20 +111,32 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
 
   return (
     <div className="flex items-center gap-2">
-      <button type="button" className={`${pillBase} ${value === "all" ? active : inactive}`} onClick={() => onChange("all")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "all" ? active : inactive}`}
+        onClick={() => onChange("all")}
+      >
         All
       </button>
-      <button type="button" className={`${pillBase} ${value === "1m" ? active : inactive}`} onClick={() => onChange("1m")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1m" ? active : inactive}`}
+        onClick={() => onChange("1m")}
+      >
         1M
       </button>
-      <button type="button" className={`${pillBase} ${value === "1y" ? active : inactive}`} onClick={() => onChange("1y")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1y" ? active : inactive}`}
+        onClick={() => onChange("1y")}
+      >
         1Y
       </button>
     </div>
   );
 }
 
-/** Step 2 fix: consistent value block height so cards align */
+/** consistent value block height so cards align */
 function MetricCard(props: {
   title: string;
   value: React.ReactNode;
@@ -128,13 +151,14 @@ function MetricCard(props: {
       <CardContent className="p-5">
         <p className="text-sm font-medium text-gray-600">{title}</p>
 
-        {/* fixed value area so all cards line up */}
         <div className="mt-3 min-h-[52px] flex flex-col justify-center">
           <div className={`text-2xl font-semibold tracking-tight text-gray-900 leading-none ${valueClassName ?? ""}`}>
             {value}
           </div>
           {subValue ? (
-            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
+            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>
+              {subValue}
+            </div>
           ) : null}
         </div>
       </CardContent>
@@ -154,7 +178,6 @@ function niceTicks(min: number, max: number, count: number, mode: ChartMode): { 
 
   const span = Math.abs(max - min);
 
-  // step size base
   const rawStep = span / (count - 1);
   const pow10 = Math.pow(10, Math.floor(Math.log10(rawStep)));
   const scaled = rawStep / pow10;
@@ -167,9 +190,7 @@ function niceTicks(min: number, max: number, count: number, mode: ChartMode): { 
 
   let step = stepMult * pow10;
 
-  // tighter for percent charts
   if (mode === "percent") {
-    // ensure a "nice" step like 0.5/1/2/5/10
     if (step < 0.5) step = 0.5;
     if (step > 25) step = 25;
   }
@@ -296,7 +317,10 @@ export default function OverviewTab() {
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
-    const totalCost = state.positions.reduce((acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0), 0);
+    const totalCost = state.positions.reduce(
+      (acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0),
+      0,
+    );
     const unrealized = totalValue - totalCost;
 
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
@@ -318,7 +342,6 @@ export default function OverviewTab() {
     let lastBenchClose: number | undefined = undefined;
     let benchIdx = 0;
 
-    // Step: avoid benchmark "0" values -> use null so Y-axis doesn't blow up & 1M zoom works
     const aligned = filteredHistorySeries.map((p) => {
       while (benchIdx < benchArr.length && benchArr[benchIdx].date <= p.date) {
         lastBenchClose = benchArr[benchIdx].close;
@@ -329,15 +352,25 @@ export default function OverviewTab() {
       const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
+      const benchPct =
+        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : undefined;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
+          ? chartBaseline * (benchClose / benchFirstClose)
+          : undefined;
 
       return {
         d: p.date,
         v: mode === "dollar" ? portfolioDollar : portfolioPct,
-        b: mode === "dollar" ? (typeof benchDollarIndexed === "number" ? Number(benchDollarIndexed.toFixed(2)) : null) : (typeof benchPct === "number" ? Number(benchPct.toFixed(4)) : null),
+        b:
+          mode === "dollar"
+            ? typeof benchDollarIndexed === "number"
+              ? Number(benchDollarIndexed.toFixed(2))
+              : null
+            : typeof benchPct === "number"
+              ? Number(benchPct.toFixed(4))
+              : null,
         breakdown: p.breakdown ?? {},
         totalDollar: portfolioDollar,
         benchDollar: typeof benchDollarIndexed === "number" ? Number(benchDollarIndexed.toFixed(2)) : null,
@@ -352,7 +385,6 @@ export default function OverviewTab() {
     const yMin = vals.length ? Math.min(...vals) : 0;
     const yMax = vals.length ? Math.max(...vals) : 0;
 
-    // Slightly tighter padding for 1M so it feels “zoomed”
     const range = yMax - yMin;
     const pad =
       range > 0
@@ -363,12 +395,23 @@ export default function OverviewTab() {
 
     const { ticks, domain } = niceTicks(yMin - pad, yMax + pad, 5, mode);
 
+    // --- True performance (TWR + IRR) ---
+    const flows = cashFlowsFromTransactions(state.transactions ?? []);
+    const perfSeries = historySeries.map((p) => ({ date: p.date, value: p.value }));
+    const terminalValue = perfSeries.length ? perfSeries.at(-1)!.value : totalValue;
+    const terminalDate = perfSeries.length ? perfSeries.at(-1)!.date : todayISO();
+
+    const twrValue = perfSeries.length >= 2 ? twr(perfSeries, flows) : null; // cumulative (fraction)
+    const irrFlows = xirrCashFlowsWithTerminalValue(flows, terminalDate, terminalValue);
+    const xirrValue = xirr(irrFlows); // annualized (fraction)
+
     const updates =
       historySeries.length < 2
         ? []
         : [
             `Latest: Your portfolio ${periodChange >= 0 ? "gained" : "fell"} ${fmtNumber(Math.abs(periodChange), 2)}% (1 day).`,
             `Diversification score: ${diversificationScore}/100.`,
+            ...(typeof twrValue === "number" ? [`True return (TWR): ${fmtSignedPct(twrValue * 100, 2)} since start.`] : []),
           ];
 
     const killer = (() => {
@@ -376,7 +419,8 @@ export default function OverviewTab() {
 
       const rows = state.positions
         .map((p) => {
-          const current = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+          const current =
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
           const cost = Number(p.costBasisPerUnit) || 0;
           const qty = Number(p.quantity) || 0;
           const pnl = (current - cost) * qty;
@@ -393,18 +437,41 @@ export default function OverviewTab() {
     })();
 
     return {
-      kpis: { totalValue, unrealized, dayChange: periodChange, sinceStartDollar, sinceStartPercent },
+      kpis: {
+        totalValue,
+        unrealized,
+        dayChange: periodChange,
+        sinceStartDollar,
+        sinceStartPercent,
+        twr: twrValue, // fraction
+        xirr: xirrValue, // fraction
+        hasFlows: flows.some((f) => f.amount !== 0),
+      },
       chartData: aligned,
       yAxis: { ticks, domain },
       updates,
       killer,
       periodLabel,
     };
-  }, [state.positions, diversificationScore, historySeries, filteredHistorySeries, mode, benchSeries, showBenchmark, timeframe]);
+  }, [
+    state.positions,
+    state.transactions,
+    diversificationScore,
+    historySeries,
+    filteredHistorySeries,
+    mode,
+    benchSeries,
+    showBenchmark,
+    timeframe,
+  ]);
+
+  const twrColor =
+    typeof kpis.twr === "number" ? (kpis.twr >= 0 ? "text-emerald-600" : "text-red-600") : "text-gray-900";
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* 5-up on desktop so True Performance fits cleanly */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard title="Total Portfolio Value" value={fmtMoney(kpis.totalValue)} />
 
         <MetricCard
@@ -436,6 +503,20 @@ export default function OverviewTab() {
           value={fmtSignedPct(kpis.dayChange, 2)}
           valueClassName={kpis.dayChange >= 0 ? "text-emerald-600" : "text-red-600"}
         />
+
+        <MetricCard
+          title="True Return (TWR)"
+          value={typeof kpis.twr === "number" ? fmtSignedPct(kpis.twr * 100, 2) : "—"}
+          valueClassName={twrColor}
+          subValue={
+            typeof kpis.xirr === "number"
+              ? `IRR: ${fmtSignedPct(kpis.xirr * 100, 2)}/yr`
+              : kpis.hasFlows
+                ? "IRR: add more history"
+                : "IRR: add deposits/withdrawals"
+          }
+          subValueClassName="text-gray-600"
+        />
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -443,7 +524,12 @@ export default function OverviewTab() {
           <TimeframePills value={timeframe} onChange={setTimeframe} />
 
           <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-2 text-sm text-gray-700 select-none">
-            <input type="checkbox" className="h-4 w-4" checked={showBenchmark} onChange={(e) => setShowBenchmark(e.target.checked)} />
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={showBenchmark}
+              onChange={(e) => setShowBenchmark(e.target.checked)}
+            />
             <span className="font-medium">S&amp;P 500</span>
           </label>
         </div>
@@ -514,9 +600,7 @@ export default function OverviewTab() {
                             <div className="flex justify-between gap-6">
                               <span className="text-gray-600">S&amp;P 500 (SPY)</span>
                               <span className="font-semibold">
-                                {mode === "dollar"
-                                  ? fmtMoney(point.benchDollar ?? 0)
-                                  : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
+                                {mode === "dollar" ? fmtMoney(point.benchDollar ?? 0) : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
                               </span>
                             </div>
                           )}
@@ -576,7 +660,8 @@ export default function OverviewTab() {
                 {killer.pnl >= 0 ? "+" : ""}
                 {fmtMoney(killer.pnl)}
               </span>
-              ). <span className="text-gray-600">If you want a smoother ride, reduce single-name concentration over time.</span>
+              ).{" "}
+              <span className="text-gray-600">If you want a smoother ride, reduce single-name concentration over time.</span>
             </div>
           ) : (
             <div className="mt-2 text-sm text-gray-600">Add positions to see your biggest return driver.</div>
