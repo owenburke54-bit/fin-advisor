@@ -1,16 +1,11 @@
+// lib/usePortfolioState.ts
 "use client";
 
 /* eslint-disable @typescript-eslint/no-empty-function */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { fetchPricesForTickers } from "./marketData";
-import type {
-  PortfolioState,
-  Position,
-  UserProfile,
-  AssetClass,
-  AccountType,
-  Transaction,
-} from "./types";
+import type { PortfolioState, Position, UserProfile, AssetClass, AccountType, Transaction } from "./types";
+import { isBondLike, isCashLike, isEquityLike } from "./types";
 import {
   getInitialState,
   loadState,
@@ -21,11 +16,34 @@ import {
   valueForPosition,
 } from "./portfolioStorage";
 
+export type DiversificationTier = "Excellent" | "Good" | "Fair" | "Poor";
+
+export type DiversificationDetails = {
+  tier: DiversificationTier;
+  tierHint: string;
+
+  topHoldingTicker: string | null;
+  topHoldingPct: number; // 0..1
+  top3Pct: number; // 0..1
+
+  buckets: {
+    equity: number; // 0..1
+    bonds: number; // 0..1
+    cash: number; // 0..1
+    other: number; // 0..1
+  };
+
+  why: string[]; // actionable bullets
+};
+
 export interface UsePortfolio {
   state: PortfolioState;
   loading: boolean;
+
   diversificationScore: number;
+  diversificationDetails: DiversificationDetails;
   topConcentrations: { ticker: string; value: number; percent: number }[];
+
   refreshPrices: (positionsOverride?: Position[]) => Promise<void>;
   takeSnapshot: () => void;
   setProfile: (profile: UserProfile) => void;
@@ -44,6 +62,17 @@ export interface UsePortfolio {
 }
 
 const PortfolioContext = createContext<UsePortfolio | null>(null);
+
+function tierForScore(score: number): { tier: DiversificationTier; tierHint: string } {
+  if (score >= 85) return { tier: "Excellent", tierHint: "Very well diversified across holdings and asset classes." };
+  if (score >= 70) return { tier: "Good", tierHint: "Solid diversification with a few areas to improve." };
+  if (score >= 40) return { tier: "Fair", tierHint: "Moderately concentrated—rebalancing would help." };
+  return { tier: "Poor", tierHint: "Highly concentrated—consider spreading risk across more holdings/classes." };
+}
+
+function pctFmt(p: number) {
+  return `${Math.round(p * 100)}%`;
+}
 
 function usePortfolioStateImpl(): UsePortfolio {
   const [state, setState] = useState<PortfolioState>(getInitialState());
@@ -104,11 +133,11 @@ function usePortfolioStateImpl(): UsePortfolio {
       setState((prev) => {
         const positions = prev.positions.map((p) => {
           const t = (p.ticker || "").toUpperCase();
-          const isCashLike = p.assetClass === "Money Market" || p.assetClass === "Cash";
+          const isCashLikeLocal = p.assetClass === "Money Market" || p.assetClass === "Cash";
 
           const md = data[t];
           if (!md) {
-            if (isCashLike && (typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice))) {
+            if (isCashLikeLocal && (typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice))) {
               return { ...p, currentPrice: 1 };
             }
             return p;
@@ -133,9 +162,7 @@ function usePortfolioStateImpl(): UsePortfolio {
     if (loading) return;
     if (state.positions.length === 0) return;
 
-    const missingAny = state.positions.some(
-      (p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice),
-    );
+    const missingAny = state.positions.some((p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice));
 
     if (missingAny) {
       void refreshPrices(state.positions);
@@ -275,10 +302,9 @@ function usePortfolioStateImpl(): UsePortfolio {
           const obj = Object.fromEntries(header.map((h, idx) => [h, cols[idx] ?? ""]));
 
           const assetClass = String(obj["assetclass"] || "Other") as AssetClass;
-          const isCashLike = assetClass === "Money Market" || assetClass === "Cash";
+          const isCashLikeLocal = assetClass === "Money Market" || assetClass === "Cash";
 
-          const currentPriceRaw =
-            header.includes("currentprice") ? Number(obj["currentprice"] || NaN) : NaN;
+          const currentPriceRaw = header.includes("currentprice") ? Number(obj["currentprice"] || NaN) : NaN;
 
           const pos: Position = {
             id: crypto.randomUUID(),
@@ -288,13 +314,10 @@ function usePortfolioStateImpl(): UsePortfolio {
             accountType: String(obj["accounttype"] || "Other") as AccountType,
             quantity: Number(obj["quantity"] || 0),
             costBasisPerUnit: Number(obj["costbasisperunit"] || 0),
-            currentPrice:
-              Number.isFinite(currentPriceRaw) ? currentPriceRaw : isCashLike ? 1 : undefined,
+            currentPrice: Number.isFinite(currentPriceRaw) ? currentPriceRaw : isCashLikeLocal ? 1 : undefined,
             currency: "USD",
             sector: undefined,
-            purchaseDate: header.includes("purchasedate")
-              ? String(obj["purchasedate"] || "") || undefined
-              : undefined,
+            purchaseDate: header.includes("purchasedate") ? String(obj["purchasedate"] || "") || undefined : undefined,
             createdAt: new Date().toISOString(),
           };
 
@@ -359,19 +382,41 @@ function usePortfolioStateImpl(): UsePortfolio {
     [refreshPrices, state.positions],
   );
 
-  const { diversificationScore, topConcentrations } = useMemo(() => {
+  const { diversificationScore, diversificationDetails, topConcentrations } = useMemo(() => {
     const total = state.positions.reduce((acc, p) => acc + valueForPosition(p), 0);
+
+    const empty: DiversificationDetails = {
+      tier: "Poor",
+      tierHint: "Add positions to compute diversification details.",
+      topHoldingTicker: null,
+      topHoldingPct: 0,
+      top3Pct: 0,
+      buckets: { equity: 0, bonds: 0, cash: 0, other: 0 },
+      why: [],
+    };
+
     if (total <= 0) {
-      return { diversificationScore: 0, topConcentrations: [] as { ticker: string; value: number; percent: number }[] };
+      return { diversificationScore: 0, diversificationDetails: empty, topConcentrations: [] as { ticker: string; value: number; percent: number }[] };
     }
 
     const byTicker = new Map<string, number>();
     const classes = new Set<AssetClass>();
 
+    // Buckets
+    let equity = 0;
+    let bonds = 0;
+    let cash = 0;
+    let other = 0;
+
     for (const p of state.positions) {
       const v = valueForPosition(p);
       byTicker.set(p.ticker, (byTicker.get(p.ticker) ?? 0) + v);
       classes.add(p.assetClass);
+
+      if (isEquityLike(p.assetClass)) equity += v;
+      else if (isBondLike(p.assetClass)) bonds += v;
+      else if (isCashLike(p.assetClass)) cash += v;
+      else other += v;
     }
 
     const shares = Array.from(byTicker.entries()).map(([t, v]) => ({
@@ -382,22 +427,70 @@ function usePortfolioStateImpl(): UsePortfolio {
 
     shares.sort((a, b) => b.percent - a.percent);
 
+    const top1 = shares[0];
+    const top3Pct = shares.slice(0, 3).reduce((acc, s) => acc + s.percent, 0);
+
     const hhi = shares.reduce((acc, s) => acc + s.percent * s.percent, 0);
     const numTickers = byTicker.size;
     const classBonus = Math.min(classes.size / 5, 1);
 
     const base = Math.min(numTickers / 12, 1) * 0.4 + (1 - hhi) * 0.4 + classBonus * 0.2;
+    const score = Math.round(base * 100);
+
+    const { tier, tierHint } = tierForScore(score);
+
+    // Actionable "why" bullets (targets are intentionally simple + beginner-friendly)
+    const why: string[] = [];
+
+    const top1Pct = top1?.percent ?? 0;
+    if (top1Pct > 0.2) why.push(`Top holding is ${pctFmt(top1Pct)} (${top1?.ticker ?? "N/A"}). Target: < 20%.`);
+    else if (top1Pct > 0.1) why.push(`Top holding is ${pctFmt(top1Pct)} (${top1?.ticker ?? "N/A"}). Consider < 10–20% range.`);
+
+    if (top3Pct > 0.6) why.push(`Top 3 holdings are ${pctFmt(top3Pct)}. Target: < 60%.`);
+    else if (top3Pct > 0.45) why.push(`Top 3 holdings are ${pctFmt(top3Pct)}. Consider adding more positions over time.`);
+
+    const cashPct = total > 0 ? cash / total : 0;
+    if (cashPct > 0.25) why.push(`Cash/MM is ${pctFmt(cashPct)}. Target (typical): ~5–15% unless saving for near-term goals.`);
+    else if (cashPct > 0.15) why.push(`Cash/MM is ${pctFmt(cashPct)}. Consider deploying some into diversified funds if appropriate.`);
+
+    const equityPct = total > 0 ? equity / total : 0;
+    const bondsPct = total > 0 ? bonds / total : 0;
+
+    if (bondsPct === 0 && (state.profile?.riskLevel ?? 3) <= 2) {
+      why.push(`Bonds are ${pctFmt(bondsPct)}. If your risk is conservative, consider adding some fixed income for stability.`);
+    }
+
+    if (why.length === 0) {
+      why.push("Your concentrations and asset mix look reasonably balanced for the number of holdings.");
+    }
+
+    const details: DiversificationDetails = {
+      tier,
+      tierHint,
+      topHoldingTicker: top1?.ticker ?? null,
+      topHoldingPct: top1Pct,
+      top3Pct,
+      buckets: {
+        equity: total ? equity / total : 0,
+        bonds: total ? bonds / total : 0,
+        cash: total ? cash / total : 0,
+        other: total ? other / total : 0,
+      },
+      why,
+    };
 
     return {
-      diversificationScore: Math.round(base * 100),
+      diversificationScore: score,
+      diversificationDetails: details,
       topConcentrations: shares.slice(0, 5),
     };
-  }, [state.positions]);
+  }, [state.positions, state.profile?.riskLevel]);
 
   return {
     state,
     loading,
     diversificationScore,
+    diversificationDetails,
     topConcentrations,
     refreshPrices,
     takeSnapshot,

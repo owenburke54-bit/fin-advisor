@@ -7,7 +7,7 @@ import { usePortfolioState } from "@/lib/usePortfolioState";
 import { isBondLike, isCashLike, isEquityLike, targetMixForRisk } from "@/lib/types";
 
 export default function AiAdvisorTab() {
-  const { state, diversificationScore } = usePortfolioState();
+  const { state, diversificationScore, diversificationDetails } = usePortfolioState();
   const [loading, setLoading] = useState(false);
   const [markdown, setMarkdown] = useState<string>("");
 
@@ -67,6 +67,7 @@ export default function AiAdvisorTab() {
           positions: state.positions,
           snapshot,
           diversificationScore,
+          diversificationDetails,
         }),
       });
 
@@ -77,14 +78,85 @@ export default function AiAdvisorTab() {
     } finally {
       setLoading(false);
     }
-  }, [state.profile, state.positions, snapshot, diversificationScore]);
+  }, [state.profile, state.positions, snapshot, diversificationScore, diversificationDetails]);
 
   return (
     <div className="space-y-4">
+      {/* Diversification details (Step 4) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Diversification Breakdown</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {state.positions.length === 0 ? (
+            <p className="text-sm text-gray-600">Add positions to see diversification details.</p>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="font-semibold text-gray-900">{diversificationScore}/100</span>
+                <span className="rounded-full border bg-white px-2 py-0.5 text-xs font-semibold">
+                  {diversificationDetails.tier}
+                </span>
+                <span className="text-gray-600">{diversificationDetails.tierHint}</span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-xs text-gray-600">Top holding</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-900">
+                    {diversificationDetails.topHoldingTicker ?? "—"} ·{" "}
+                    {Math.round(diversificationDetails.topHoldingPct * 100)}%
+                  </div>
+                </div>
+
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-xs text-gray-600">Top 3 holdings</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-900">
+                    {Math.round(diversificationDetails.top3Pct * 100)}%
+                  </div>
+                </div>
+
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-xs text-gray-600">Equity</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-900">
+                    {Math.round(diversificationDetails.buckets.equity * 100)}%
+                  </div>
+                </div>
+
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-xs text-gray-600">Cash/MM</div>
+                  <div className="mt-1 text-sm font-semibold text-gray-900">
+                    {Math.round(diversificationDetails.buckets.cash * 100)}%
+                  </div>
+                </div>
+              </div>
+
+              {diversificationDetails.why.length > 0 && (
+                <div className="rounded-lg border bg-gray-50 p-3">
+                  <div className="text-xs font-semibold text-gray-900">Why this score</div>
+                  <ul className="mt-2 space-y-1 text-sm text-gray-800">
+                    {diversificationDetails.why.map((w, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-gray-400" />
+                        <span>{w}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader className="flex items-center justify-between">
           <CardTitle>AI Portfolio Insights</CardTitle>
-          <Button onClick={regenerate} disabled={loading || !canGenerate} title={!canGenerate ? "Add profile + positions first" : ""}>
+          <Button
+            onClick={regenerate}
+            disabled={loading || !canGenerate}
+            title={!canGenerate ? "Add profile + positions first" : ""}
+          >
             {loading ? "Generating…" : "Regenerate insights"}
           </Button>
         </CardHeader>

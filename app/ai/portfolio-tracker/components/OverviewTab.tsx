@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
-import { fmtMoney, fmtPct as fmtPctBasic, fmtNumber } from "@/lib/format";
+import { fmtMoney, fmtNumber } from "@/lib/format";
 import {
   LineChart,
   Line,
@@ -127,13 +127,18 @@ function MetricCard(props: {
       <CardContent className="p-5">
         <p className="text-sm font-medium text-gray-600">{title}</p>
 
-        <div className="mt-3">
-          <div className={`text-2xl font-semibold tracking-tight text-gray-900 ${valueClassName ?? ""}`}>
+        {/* Step 2: fixed/min height + vertically centered value block so all KPI cards align */}
+        <div className="mt-3 min-h-[52px] flex flex-col justify-center">
+          <div className={`text-2xl font-semibold tracking-tight leading-none text-gray-900 ${valueClassName ?? ""}`}>
             {value}
           </div>
+
           {subValue ? (
-            <div className={`mt-1 text-sm font-medium ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
-          ) : null}
+            <div className={`mt-1 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
+          ) : (
+            // keep spacing consistent for cards without a subValue
+            <div className="mt-1 h-[14px]" />
+          )}
         </div>
       </CardContent>
     </Card>
@@ -251,7 +256,10 @@ export default function OverviewTab() {
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
-    const totalCost = state.positions.reduce((acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0), 0);
+    const totalCost = state.positions.reduce(
+      (acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0),
+      0
+    );
 
     const unrealized = totalValue - totalCost;
 
