@@ -10,6 +10,7 @@ import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { AccountType, AssetClass, Position } from "@/lib/types";
 import { valueForPosition } from "@/lib/portfolioStorage";
+import { fmtMoney } from "@/lib/format";
 
 const positionSchema = z.object({
   ticker: z.string().min(1, "Ticker is required"),
@@ -25,11 +26,6 @@ const ACCOUNT_TYPES: AccountType[] = ["Taxable", "Roth IRA", "Traditional IRA", 
 
 function isCashLike(ac: AssetClass) {
   return ac === "Money Market" || ac === "Cash";
-}
-
-function fmtDollar(n: number) {
-  const v = Number(n) || 0;
-  return `$${v.toFixed(2)}`;
 }
 
 function fmtQty(n: number) {
@@ -68,7 +64,6 @@ export default function PositionsCard() {
     if (!isCashLike(obj.assetClass)) return obj;
     return {
       ...obj,
-      // for cash-like: treat quantity as balance, prices default to 1
       costBasisPerUnit: Number.isFinite(obj.costBasisPerUnit) && obj.costBasisPerUnit > 0 ? obj.costBasisPerUnit : 1,
       currentPrice:
         typeof obj.currentPrice === "number" && Number.isFinite(obj.currentPrice) && obj.currentPrice > 0 ? obj.currentPrice : 1,
@@ -164,7 +159,6 @@ export default function PositionsCard() {
     setEditing(null);
   }
 
-  // Live preview (derived fields)
   const preview = useMemo(() => {
     const qty = Number(form.quantity) || 0;
     const cost = Number(form.costBasisPerUnit) || 0;
@@ -233,23 +227,19 @@ export default function PositionsCard() {
       </CardHeader>
 
       <CardContent className="space-y-5">
-        {/* Add form - reordered: ticker, name, asset, account, qty, initial, current */}
         <div className="space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-8 gap-3">
-            {/* Ticker */}
             <div className="sm:col-span-1">
               <label className="block text-sm mb-1">Ticker</label>
               <Input value={form.ticker} onChange={(e) => setForm({ ...form, ticker: e.target.value })} />
               {errors.ticker && <p className="text-xs text-red-600 mt-1">{errors.ticker}</p>}
             </div>
 
-            {/* Name */}
             <div className="sm:col-span-2">
               <label className="block text-sm mb-1">Name</label>
               <Input value={form.name ?? ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
 
-            {/* Asset */}
             <div>
               <label className="block text-sm mb-1">Asset</label>
               <Select value={form.assetClass} onChange={(e) => setForm({ ...form, assetClass: e.target.value as AssetClass })}>
@@ -261,7 +251,6 @@ export default function PositionsCard() {
               </Select>
             </div>
 
-            {/* Account */}
             <div>
               <label className="block text-sm mb-1">Account</label>
               <Select value={form.accountType} onChange={(e) => setForm({ ...form, accountType: e.target.value as AccountType })}>
@@ -273,7 +262,6 @@ export default function PositionsCard() {
               </Select>
             </div>
 
-            {/* Quantity / Balance */}
             <div>
               <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Balance ($)" : "Quantity"}</label>
               <Input
@@ -283,7 +271,6 @@ export default function PositionsCard() {
                   setForm({
                     ...form,
                     quantity: Number(e.target.value),
-                    // cash-like defaults
                     ...(isCashLike(form.assetClass)
                       ? {
                           costBasisPerUnit: form.costBasisPerUnit || 1,
@@ -296,7 +283,6 @@ export default function PositionsCard() {
               {errors.quantity && <p className="text-xs text-red-600 mt-1">{errors.quantity}</p>}
             </div>
 
-            {/* Initial price */}
             <div>
               <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Initial price ($)" : "Initial price"}</label>
               <Input
@@ -308,7 +294,6 @@ export default function PositionsCard() {
               {isCashLike(form.assetClass) && <p className="text-xs text-gray-600 mt-1">Usually $1.00 for money markets.</p>}
             </div>
 
-            {/* Current price */}
             <div>
               <label className="block text-sm mb-1">Current price</label>
               <Input
@@ -324,27 +309,23 @@ export default function PositionsCard() {
                 onChange={(e) =>
                   setForm({
                     ...form,
-                    currentPrice:
-                      e.target.value === ""
-                        ? undefined
-                        : Number(e.target.value),
+                    currentPrice: e.target.value === "" ? undefined : Number(e.target.value),
                   })
                 }
               />
             </div>
           </div>
 
-          {/* Derived preview: Value + P/L */}
           {preview && (
             <div className="flex flex-wrap gap-6 rounded-lg border bg-gray-50 px-3 py-2 text-sm text-gray-700">
               <div>
-                <span className="font-medium">Value:</span> {fmtDollar(preview.value)}
+                <span className="font-medium">Value:</span> {fmtMoney(preview.value)}
               </div>
               <div>
                 <span className="font-medium">P/L:</span>{" "}
                 <span className={preview.plDollar >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
                   {preview.plDollar >= 0 ? "+" : ""}
-                  {fmtDollar(preview.plDollar).replace("$-", "-$")}
+                  {fmtMoney(preview.plDollar)}
                 </span>{" "}
                 <span className="text-gray-500">
                   ({preview.plPct >= 0 ? "+" : ""}
@@ -359,7 +340,6 @@ export default function PositionsCard() {
           </div>
         </div>
 
-        {/* Table */}
         <div className="w-full">
           <div className="flex items-center justify-between mb-2">
             <p className="text-sm text-gray-600">{totalPositions} positions</p>
@@ -414,17 +394,17 @@ export default function PositionsCard() {
                         <td className="px-2 py-3 hidden lg:table-cell">{p.accountType}</td>
 
                         <td className="px-2 py-3 text-right hidden md:table-cell">{fmtQty(p.quantity)}</td>
-                        <td className="px-2 py-3 text-right hidden md:table-cell">{fmtDollar(p.costBasisPerUnit)}</td>
+                        <td className="px-2 py-3 text-right hidden md:table-cell">{fmtMoney(p.costBasisPerUnit)}</td>
                         <td className="px-2 py-3 text-right hidden lg:table-cell">
-                          {typeof p.currentPrice === "number" ? fmtDollar(p.currentPrice) : "—"}
+                          {typeof p.currentPrice === "number" ? fmtMoney(p.currentPrice) : "—"}
                         </td>
 
-                        <td className="px-2 py-3 text-right font-medium">{fmtDollar(value)}</td>
+                        <td className="px-2 py-3 text-right font-medium">{fmtMoney(value)}</td>
 
                         <td className={`px-2 py-3 text-right hidden sm:table-cell ${plDollar >= 0 ? "text-emerald-600" : "text-red-600"}`}>
                           <div className="font-medium">
                             {plDollar >= 0 ? "+" : ""}
-                            {fmtDollar(plDollar).replace("$-", "-$")}
+                            {fmtMoney(plDollar)}
                           </div>
                           <div className="text-xs">
                             {plPct >= 0 ? "+" : ""}
@@ -445,7 +425,7 @@ export default function PositionsCard() {
                           <div className="sm:hidden mt-2 text-right text-xs">
                             <span className={plDollar >= 0 ? "text-emerald-600 font-medium" : "text-red-600 font-medium"}>
                               {plDollar >= 0 ? "+" : ""}
-                              {fmtDollar(plDollar).replace("$-", "-$")}
+                              {fmtMoney(plDollar)}
                             </span>{" "}
                             <span className="text-gray-500">
                               ({plPct >= 0 ? "+" : ""}
@@ -463,7 +443,6 @@ export default function PositionsCard() {
         </div>
       </CardContent>
 
-      {/* Edit dialog */}
       <Dialog open={!!editing} onOpenChange={(o) => (!o ? setEditing(null) : null)}>
         <DialogHeader>
           <DialogTitle>Edit Position</DialogTitle>
