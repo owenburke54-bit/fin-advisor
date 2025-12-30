@@ -113,6 +113,7 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
   );
 }
 
+/** Step 2 fix: consistent value block height so cards align */
 function MetricCard(props: {
   title: string;
   value: React.ReactNode;
@@ -127,22 +128,61 @@ function MetricCard(props: {
       <CardContent className="p-5">
         <p className="text-sm font-medium text-gray-600">{title}</p>
 
-        {/* Step 2: fixed/min height + vertically centered value block so all KPI cards align */}
+        {/* fixed value area so all cards line up */}
         <div className="mt-3 min-h-[52px] flex flex-col justify-center">
-          <div className={`text-2xl font-semibold tracking-tight leading-none text-gray-900 ${valueClassName ?? ""}`}>
+          <div className={`text-2xl font-semibold tracking-tight text-gray-900 leading-none ${valueClassName ?? ""}`}>
             {value}
           </div>
-
           {subValue ? (
-            <div className={`mt-1 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
-          ) : (
-            // keep spacing consistent for cards without a subValue
-            <div className="mt-1 h-[14px]" />
-          )}
+            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
+          ) : null}
         </div>
       </CardContent>
     </Card>
   );
+}
+
+/** "Nice" Y-axis ticks (rounded numbers) */
+function niceTicks(min: number, max: number, count: number, mode: ChartMode): { ticks: number[]; domain: [number, number] } {
+  if (!Number.isFinite(min) || !Number.isFinite(max) || count < 2) {
+    return { ticks: [0, 1], domain: [0, 1] };
+  }
+  if (min === max) {
+    const pad = mode === "dollar" ? Math.max(10, Math.abs(min) * 0.02) : Math.max(0.5, Math.abs(min) * 0.1);
+    return niceTicks(min - pad, max + pad, count, mode);
+  }
+
+  const span = Math.abs(max - min);
+
+  // step size base
+  const rawStep = span / (count - 1);
+  const pow10 = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const scaled = rawStep / pow10;
+
+  let stepMult = 1;
+  if (scaled <= 1) stepMult = 1;
+  else if (scaled <= 2) stepMult = 2;
+  else if (scaled <= 5) stepMult = 5;
+  else stepMult = 10;
+
+  let step = stepMult * pow10;
+
+  // tighter for percent charts
+  if (mode === "percent") {
+    // ensure a "nice" step like 0.5/1/2/5/10
+    if (step < 0.5) step = 0.5;
+    if (step > 25) step = 25;
+  }
+
+  const niceMin = Math.floor(min / step) * step;
+  const niceMax = Math.ceil(max / step) * step;
+
+  const ticks: number[] = [];
+  for (let v = niceMin; v <= niceMax + step / 2; v += step) {
+    ticks.push(Number(v.toFixed(10)));
+  }
+
+  return { ticks, domain: [niceMin, niceMax] };
 }
 
 export default function OverviewTab() {
@@ -249,18 +289,14 @@ export default function OverviewTab() {
     void runBench();
   }, [filteredHistorySeries, showBenchmark]);
 
-  const { kpis, chartData, yDomain, updates, killer, periodLabel } = useMemo(() => {
+  const { kpis, chartData, yAxis, updates, killer, periodLabel } = useMemo(() => {
     const totalValue = state.positions.reduce((acc, p) => {
       const unit =
         typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
-    const totalCost = state.positions.reduce(
-      (acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0),
-      0
-    );
-
+    const totalCost = state.positions.reduce((acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0), 0);
     const unrealized = totalValue - totalCost;
 
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
@@ -274,7 +310,6 @@ export default function OverviewTab() {
         : 0;
 
     const periodLabel = "1-Day Change";
-
     const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
 
     const benchArr = benchSeries.slice().sort((a, b) => a.date.localeCompare(b.date));
@@ -283,6 +318,7 @@ export default function OverviewTab() {
     let lastBenchClose: number | undefined = undefined;
     let benchIdx = 0;
 
+    // Step: avoid benchmark "0" values -> use null so Y-axis doesn't blow up & 1M zoom works
     const aligned = filteredHistorySeries.map((p) => {
       while (benchIdx < benchArr.length && benchArr[benchIdx].date <= p.date) {
         lastBenchClose = benchArr[benchIdx].close;
@@ -293,37 +329,39 @@ export default function OverviewTab() {
       const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : 0;
+      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
-          ? chartBaseline * (benchClose / benchFirstClose)
-          : 0;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : undefined;
 
       return {
         d: p.date,
         v: mode === "dollar" ? portfolioDollar : portfolioPct,
-        b: mode === "dollar" ? Number(benchDollarIndexed.toFixed(2)) : Number(benchPct.toFixed(4)),
+        b: mode === "dollar" ? (typeof benchDollarIndexed === "number" ? Number(benchDollarIndexed.toFixed(2)) : null) : (typeof benchPct === "number" ? Number(benchPct.toFixed(4)) : null),
         breakdown: p.breakdown ?? {},
         totalDollar: portfolioDollar,
-        benchDollar: Number(benchDollarIndexed.toFixed(2)),
-        benchPct: Number(benchPct.toFixed(4)),
+        benchDollar: typeof benchDollarIndexed === "number" ? Number(benchDollarIndexed.toFixed(2)) : null,
+        benchPct: typeof benchPct === "number" ? Number(benchPct.toFixed(4)) : null,
       };
     });
 
-    const vals = aligned.flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v])).filter((n) => Number.isFinite(n));
+    const vals = aligned
+      .flatMap((d) => (showBenchmark ? [d.v, d.b] : [d.v]))
+      .filter((n): n is number => typeof n === "number" && Number.isFinite(n));
+
     const yMin = vals.length ? Math.min(...vals) : 0;
     const yMax = vals.length ? Math.max(...vals) : 0;
-    const range = yMax - yMin;
 
+    // Slightly tighter padding for 1M so it feels “zoomed”
+    const range = yMax - yMin;
     const pad =
       range > 0
-        ? range * 0.12
+        ? range * (timeframe === "1m" ? 0.08 : 0.12)
         : mode === "dollar"
           ? Math.max(10, Math.abs(yMin) * 0.01)
           : Math.max(0.5, Math.abs(yMin) * 0.05);
 
-    const yDomain: [number, number] = [yMin - pad, yMax + pad];
+    const { ticks, domain } = niceTicks(yMin - pad, yMax + pad, 5, mode);
 
     const updates =
       historySeries.length < 2
@@ -338,8 +376,7 @@ export default function OverviewTab() {
 
       const rows = state.positions
         .map((p) => {
-          const current =
-            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+          const current = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
           const cost = Number(p.costBasisPerUnit) || 0;
           const qty = Number(p.quantity) || 0;
           const pnl = (current - cost) * qty;
@@ -352,28 +389,18 @@ export default function OverviewTab() {
       rows.sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
       const top = rows[0];
 
-      return {
-        ticker: top.ticker,
-        pnl: top.pnl,
-        dir: top.pnl >= 0 ? "gains" : "losses",
-      };
+      return { ticker: top.ticker, pnl: top.pnl, dir: top.pnl >= 0 ? "gains" : "losses" };
     })();
 
     return {
-      kpis: {
-        totalValue,
-        unrealized,
-        dayChange: periodChange,
-        sinceStartDollar,
-        sinceStartPercent,
-      },
+      kpis: { totalValue, unrealized, dayChange: periodChange, sinceStartDollar, sinceStartPercent },
       chartData: aligned,
-      yDomain,
+      yAxis: { ticks, domain },
       updates,
       killer,
       periodLabel,
     };
-  }, [state.positions, diversificationScore, historySeries, filteredHistorySeries, mode, benchSeries, showBenchmark]);
+  }, [state.positions, diversificationScore, historySeries, filteredHistorySeries, mode, benchSeries, showBenchmark, timeframe]);
 
   return (
     <div className="space-y-4">
@@ -449,7 +476,8 @@ export default function OverviewTab() {
                 <CartesianGrid strokeDasharray="4 4" />
                 <XAxis dataKey="d" tickMargin={8} minTickGap={28} tickFormatter={formatAxisDate} />
                 <YAxis
-                  domain={yDomain}
+                  domain={yAxis.domain}
+                  ticks={yAxis.ticks}
                   tickFormatter={(v: number) => (mode === "dollar" ? fmtMoney(v) : `${fmtNumber(v, 1)}%`)}
                 />
 
@@ -460,11 +488,11 @@ export default function OverviewTab() {
                     const point = payload[0].payload as {
                       d: string;
                       v: number;
-                      b: number;
+                      b: number | null;
                       breakdown: Record<string, number>;
                       totalDollar: number;
-                      benchDollar: number;
-                      benchPct: number;
+                      benchDollar: number | null;
+                      benchPct: number | null;
                     };
 
                     const entries = Object.entries(point.breakdown || {});
@@ -482,11 +510,13 @@ export default function OverviewTab() {
                             </span>
                           </div>
 
-                          {showBenchmark && (
+                          {showBenchmark && point.b !== null && (
                             <div className="flex justify-between gap-6">
                               <span className="text-gray-600">S&amp;P 500 (SPY)</span>
                               <span className="font-semibold">
-                                {mode === "dollar" ? fmtMoney(point.benchDollar) : `${fmtNumber(point.benchPct, 2)}%`}
+                                {mode === "dollar"
+                                  ? fmtMoney(point.benchDollar ?? 0)
+                                  : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
                               </span>
                             </div>
                           )}
@@ -514,8 +544,18 @@ export default function OverviewTab() {
                 />
 
                 <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2} dot={false} />
+
                 {showBenchmark && (
-                  <Line type="monotone" dataKey="b" stroke="#111827" strokeWidth={2} strokeDasharray="6 6" dot={false} isAnimationActive={false} />
+                  <Line
+                    type="monotone"
+                    dataKey="b"
+                    stroke="#111827"
+                    strokeWidth={2}
+                    strokeDasharray="6 6"
+                    dot={false}
+                    isAnimationActive={false}
+                    connectNulls
+                  />
                 )}
               </LineChart>
             </ResponsiveContainer>

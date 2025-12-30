@@ -72,7 +72,8 @@ export default function AiAdvisorTab() {
       });
 
       const data = await res.json();
-      setMarkdown(data.markdown ?? "## No insights available\nTry again.");
+      const raw = String(data.markdown ?? "## No insights available\nTry again.");
+      setMarkdown(stripDuplicateH1(raw));
     } catch {
       setMarkdown("## Error\nFailed to generate insights. Please try again.");
     } finally {
@@ -82,88 +83,19 @@ export default function AiAdvisorTab() {
 
   return (
     <div className="space-y-4">
-      {/* Diversification details (Step 4) */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Diversification Breakdown</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {state.positions.length === 0 ? (
-            <p className="text-sm text-gray-600">Add positions to see diversification details.</p>
-          ) : (
-            <div className="space-y-3">
-              <div className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="font-semibold text-gray-900">{diversificationScore}/100</span>
-                <span className="rounded-full border bg-white px-2 py-0.5 text-xs font-semibold">
-                  {diversificationDetails.tier}
-                </span>
-                <span className="text-gray-600">{diversificationDetails.tierHint}</span>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Top holding</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {diversificationDetails.topHoldingTicker ?? "—"} ·{" "}
-                    {Math.round(diversificationDetails.topHoldingPct * 100)}%
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Top 3 holdings</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.top3Pct * 100)}%
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Equity</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.buckets.equity * 100)}%
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Cash/MM</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.buckets.cash * 100)}%
-                  </div>
-                </div>
-              </div>
-
-              {diversificationDetails.why.length > 0 && (
-                <div className="rounded-lg border bg-gray-50 p-3">
-                  <div className="text-xs font-semibold text-gray-900">Why this score</div>
-                  <ul className="mt-2 space-y-1 text-sm text-gray-800">
-                    {diversificationDetails.why.map((w, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-gray-400" />
-                        <span>{w}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
       <Card>
         <CardHeader className="flex items-center justify-between">
           <CardTitle>AI Portfolio Insights</CardTitle>
-          <Button
-            onClick={regenerate}
-            disabled={loading || !canGenerate}
-            title={!canGenerate ? "Add profile + positions first" : ""}
-          >
+          <Button onClick={regenerate} disabled={loading || !canGenerate} title={!canGenerate ? "Add profile + positions first" : ""}>
             {loading ? "Generating…" : "Regenerate insights"}
           </Button>
         </CardHeader>
 
         <CardContent>
           {markdown ? (
-            <MarkdownLite text={markdown} />
+            <div className="rounded-xl border bg-white p-4">
+              <MarkdownLite text={markdown} />
+            </div>
           ) : (
             <div className="text-sm text-gray-600">
               Add your profile + positions, then click <span className="font-medium">Regenerate insights</span>.
@@ -191,6 +123,14 @@ export default function AiAdvisorTab() {
   );
 }
 
+function stripDuplicateH1(md: string) {
+  const lines = md.split("\n");
+  if (lines[0]?.trim() === "# AI Portfolio Insights") {
+    return lines.slice(1).join("\n").replace(/^\s*\n/, "");
+  }
+  return md;
+}
+
 function deltaText(delta: number): string {
   const pct = Math.round(delta * 100);
   if (pct === 0) return "aligned";
@@ -200,20 +140,49 @@ function deltaText(delta: number): string {
 
 /**
  * Lightweight markdown rendering without adding deps.
- * Supports: # / ## headings, bullets (-), and blockquotes (>)
+ * Supports: # / ## headings, bullets (-), blockquotes (>), and tables (|...|)
  */
 function MarkdownLite({ text }: { text: string }) {
   const lines = text.split("\n");
 
+  // group contiguous table lines
+  const blocks: { type: "table" | "line"; lines: string[] }[] = [];
+  let i = 0;
+
+  const isTableLine = (l: string) => {
+    const s = l.trim();
+    return s.startsWith("|") && s.includes("|");
+  };
+
+  while (i < lines.length) {
+    const raw = lines[i];
+    if (isTableLine(raw)) {
+      const tbl: string[] = [];
+      while (i < lines.length && isTableLine(lines[i])) {
+        tbl.push(lines[i]);
+        i++;
+      }
+      blocks.push({ type: "table", lines: tbl });
+      continue;
+    }
+    blocks.push({ type: "line", lines: [raw] });
+    i++;
+  }
+
   return (
     <div className="space-y-2">
-      {lines.map((raw, idx) => {
+      {blocks.map((b, idx) => {
+        if (b.type === "table") {
+          return <MarkdownTable key={idx} lines={b.lines} />;
+        }
+
+        const raw = b.lines[0];
         const line = raw.trim();
-        if (!line) return <div key={idx} className="h-1" />;
+        if (!line) return <div key={idx} className="h-2" />;
 
         if (line.startsWith("# ")) {
           return (
-            <h2 key={idx} className="text-base font-semibold text-gray-900">
+            <h2 key={idx} className="text-lg font-semibold text-gray-900">
               {line.replace(/^#\s+/, "")}
             </h2>
           );
@@ -221,15 +190,23 @@ function MarkdownLite({ text }: { text: string }) {
 
         if (line.startsWith("## ")) {
           return (
-            <h3 key={idx} className="text-sm font-semibold text-gray-900 mt-2">
+            <h3 key={idx} className="text-base font-semibold text-gray-900 mt-3">
               {line.replace(/^##\s+/, "")}
             </h3>
           );
         }
 
+        if (line.startsWith("### ")) {
+          return (
+            <h4 key={idx} className="text-sm font-semibold text-gray-900 mt-2">
+              {line.replace(/^###\s+/, "")}
+            </h4>
+          );
+        }
+
         if (line.startsWith(">")) {
           return (
-            <div key={idx} className="rounded-md border bg-gray-50 px-3 py-2 text-sm text-gray-700">
+            <div key={idx} className="rounded-lg border bg-gray-50 px-3 py-2 text-sm text-gray-700">
               {line.replace(/^>\s?/, "")}
             </div>
           );
@@ -238,7 +215,7 @@ function MarkdownLite({ text }: { text: string }) {
         if (line.startsWith("- ")) {
           return (
             <div key={idx} className="flex gap-2 text-sm text-gray-800">
-              <span className="mt-[6px] h-1.5 w-1.5 rounded-full bg-gray-400" />
+              <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-gray-400" />
               <div>{line.replace(/^- /, "")}</div>
             </div>
           );
@@ -250,6 +227,56 @@ function MarkdownLite({ text }: { text: string }) {
           </p>
         );
       })}
+    </div>
+  );
+}
+
+function MarkdownTable({ lines }: { lines: string[] }) {
+  // Expected:
+  // | A | B |
+  // |---|---|
+  // | ... |
+  const cleaned = lines.map((l) => l.trim()).filter(Boolean);
+  if (cleaned.length < 2) return null;
+
+  const parseRow = (row: string) =>
+    row
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
+
+  const header = parseRow(cleaned[0]);
+  const bodyRows = cleaned
+    .slice(2) // skip separator
+    .map(parseRow)
+    .filter((r) => r.length);
+
+  return (
+    <div className="overflow-x-auto rounded-lg border">
+      <table className="min-w-full text-sm">
+        <thead className="bg-gray-50">
+          <tr>
+            {header.map((h, i) => (
+              <th key={i} className={`px-3 py-2 font-semibold text-gray-900 ${i === 0 ? "text-left" : "text-right"}`}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {bodyRows.map((r, ri) => (
+            <tr key={ri} className={ri % 2 === 0 ? "bg-white" : "bg-gray-50/50"}>
+              {r.map((c, ci) => (
+                <td key={ci} className={`px-3 py-2 text-gray-800 ${ci === 0 ? "text-left" : "text-right"}`}>
+                  {c}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -31,10 +31,10 @@ function fmtPct(p: number) {
 
 function shortAssetName(name: string) {
   const map: Record<string, string> = {
-    "Money Market": "MM",
-    "Mutual Fund": "MF",
-    "International Equity": "Intl",
-    "US Equity": "US",
+    "Money Market": "Money Market",
+    "Mutual Fund": "Mutual Fund",
+    "International Equity": "International",
+    "US Equity": "US Equity",
     "Fixed Income": "Bonds",
   };
   return map[name] ?? name;
@@ -45,10 +45,8 @@ function useMediaQuery(query: string) {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-
     const mql = window.matchMedia(query);
     const onChange = () => setMatches(mql.matches);
-
     onChange();
     mql.addEventListener?.("change", onChange);
     return () => mql.removeEventListener?.("change", onChange);
@@ -57,30 +55,11 @@ function useMediaQuery(query: string) {
   return matches;
 }
 
-function renderPieLabel(props: any) {
-  const { cx, cy, midAngle, innerRadius, outerRadius, percent, name } = props;
-
-  // Hide tiny slices to avoid clutter
-  if (!percent || percent < 0.03) return null;
-
-  const r = innerRadius + (outerRadius - innerRadius) * 0.6;
-  const x = cx + r * Math.cos(-midAngle * (Math.PI / 180));
-  const y = cy + r * Math.sin(-midAngle * (Math.PI / 180));
-
-  const label = `${shortAssetName(String(name))} ${Math.round((Number(percent) || 0) * 100)}%`;
-
-  return (
-    <text x={x} y={y} textAnchor="middle" dominantBaseline="central" fontSize={12}>
-      {label}
-    </text>
-  );
-}
-
 function scoreLabel(score: number) {
-  if (score >= 85) return { tier: "Excellent", hint: "Very well diversified across holdings and asset classes." };
+  if (score >= 85) return { tier: "Excellent", hint: "Very well diversified across holdings and buckets." };
   if (score >= 70) return { tier: "Good", hint: "Solid diversification with a few areas to improve." };
   if (score >= 40) return { tier: "Fair", hint: "Moderately concentrated—rebalancing would help." };
-  return { tier: "Poor", hint: "Highly concentrated—consider spreading risk across more holdings/classes." };
+  return { tier: "Poor", hint: "Highly concentrated—consider spreading risk." };
 }
 
 export default function AllocationTab() {
@@ -111,7 +90,6 @@ export default function AllocationTab() {
       percent: total ? value / total : 0,
     }));
 
-    // Sort (largest first) for nicer visuals/legend order
     assetData.sort((a, b) => b.value - a.value);
     accountData.sort((a, b) => b.value - a.value);
 
@@ -128,51 +106,58 @@ export default function AllocationTab() {
             <CardTitle>Asset Class Allocation</CardTitle>
           </CardHeader>
 
-          <CardContent className="h-[260px]">
+          <CardContent className="h-[320px]">
             {total === 0 ? (
               <p className="text-sm text-gray-600">Add positions to see allocation.</p>
             ) : (
-              <div className="w-full h-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={assetData}
-                      dataKey="value"
-                      nameKey="name"
-                      innerRadius={55}
-                      outerRadius={90}
-                      paddingAngle={2}
-                      labelLine={false}
-                      // Step 3 fix: hide labels on mobile; desktop labels are smaller + thresholded
-                      label={!isMobile ? renderPieLabel : false}
-                      isAnimationActive={false}
-                    >
-                      {assetData.map((_, idx) => (
-                        <Cell key={idx} fill={COLORS[idx % COLORS.length]} />
-                      ))}
-                    </Pie>
+              <div className="w-full h-full flex flex-col">
+                <div className="flex-1">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={assetData}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={55}
+                        outerRadius={90}
+                        paddingAngle={2}
+                        labelLine={false}
+                        label={false}
+                        isAnimationActive={false}
+                      >
+                        {assetData.map((_, idx) => (
+                          <Cell key={idx} fill={COLORS[idx % COLORS.length]} />
+                        ))}
+                      </Pie>
 
-                    <ReTooltip
-                      formatter={(value: any, _name: any, props: any) => {
-                        const payload = props?.payload as { percent?: number; name?: string };
-                        const pct = typeof payload?.percent === "number" ? ` (${fmtPct(payload.percent)})` : "";
-                        return [`${fmtDollar(Number(value))}${pct}`, payload?.name ?? "Value"];
-                      }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
+                      <ReTooltip
+                        formatter={(value: any, _name: any, props: any) => {
+                          const payload = props?.payload as { percent?: number; name?: string };
+                          const pct = typeof payload?.percent === "number" ? ` (${fmtPct(payload.percent)})` : "";
+                          return [`${fmtDollar(Number(value))}${pct}`, payload?.name ?? "Value"];
+                        }}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
 
-                {/* Mobile legend/list to replace outside labels */}
-                {isMobile && (
-                  <div className="mt-3 space-y-2">
-                    {assetData.map((d) => (
-                      <div key={d.name} className="flex items-center justify-between text-sm">
-                        <span className="text-gray-700">{shortAssetName(d.name)}</span>
-                        <span className="font-medium text-gray-900">{fmtPct(d.percent)}</span>
+                {/* Clean legend (better than cluttered labels) */}
+                <div className={`mt-3 grid ${isMobile ? "grid-cols-1" : "grid-cols-2"} gap-2`}>
+                  {assetData.map((d, idx) => (
+                    <div key={d.name} className="flex items-center justify-between text-sm">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className="h-2.5 w-2.5 rounded-full"
+                          style={{ backgroundColor: COLORS[idx % COLORS.length] }}
+                        />
+                        <span className="text-gray-700 truncate">{shortAssetName(d.name)}</span>
                       </div>
-                    ))}
-                  </div>
-                )}
+                      <span className="font-medium text-gray-900">
+                        {fmtPct(d.percent)} <span className="text-gray-500 font-normal">({fmtDollar(d.value)})</span>
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </CardContent>
@@ -191,10 +176,7 @@ export default function AllocationTab() {
                   <CartesianGrid strokeDasharray="4 4" />
                   <XAxis dataKey="name" tickMargin={8} />
                   <YAxis tickFormatter={(v: number) => fmtDollar(v)} />
-                  <ReTooltip
-                    formatter={(value: any) => fmtDollar(Number(value))}
-                    labelFormatter={(label: any) => `Account: ${String(label)}`}
-                  />
+                  <ReTooltip formatter={(value: any) => fmtDollar(Number(value))} labelFormatter={(label: any) => `Account: ${String(label)}`} />
                   <Bar dataKey="value" fill="#2563eb" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -218,72 +200,35 @@ export default function AllocationTab() {
             <span className="text-sm text-gray-600">{tierMeta.hint}</span>
           </div>
 
-          {/* Step 4: make the score meaningful + actionable */}
           {state.positions.length > 0 && (
-            <div className="mt-4 space-y-3">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Top holding</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {diversificationDetails.topHoldingTicker ?? "—"} ·{" "}
-                    {Math.round(diversificationDetails.topHoldingPct * 100)}%
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Top 3 holdings</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.top3Pct * 100)}%
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Equity</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.buckets.equity * 100)}%
-                  </div>
-                </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Cash/MM</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.buckets.cash * 100)}%
-                  </div>
+            <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-lg border bg-white p-3">
+                <div className="text-xs text-gray-600">Top holding</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {diversificationDetails.topHoldingTicker ?? "—"} · {Math.round(diversificationDetails.topHoldingPct * 100)}%
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Bonds</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.buckets.bonds * 100)}%
-                  </div>
+              <div className="rounded-lg border bg-white p-3">
+                <div className="text-xs text-gray-600">Top 3 holdings</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {Math.round(diversificationDetails.top3Pct * 100)}%
                 </div>
-
-                <div className="rounded-lg border bg-white p-3">
-                  <div className="text-xs text-gray-600">Other</div>
-                  <div className="mt-1 text-sm font-semibold text-gray-900">
-                    {Math.round(diversificationDetails.buckets.other * 100)}%
-                  </div>
-                </div>
-
-                <div className="hidden sm:block" />
-                <div className="hidden sm:block" />
               </div>
 
-              {diversificationDetails.why.length > 0 && (
-                <div className="rounded-lg border bg-gray-50 p-3">
-                  <div className="text-xs font-semibold text-gray-900">Why this score</div>
-                  <ul className="mt-2 space-y-1 text-sm text-gray-800">
-                    {diversificationDetails.why.map((w, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-gray-400" />
-                        <span>{w}</span>
-                      </li>
-                    ))}
-                  </ul>
+              <div className="rounded-lg border bg-white p-3">
+                <div className="text-xs text-gray-600">Equity</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {Math.round(diversificationDetails.buckets.equity * 100)}%
                 </div>
-              )}
+              </div>
+
+              <div className="rounded-lg border bg-white p-3">
+                <div className="text-xs text-gray-600">Cash/MM</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {Math.round(diversificationDetails.buckets.cash * 100)}%
+                </div>
+              </div>
             </div>
           )}
         </CardContent>
