@@ -33,9 +33,68 @@ function fmtQty(n: number) {
   return v.toLocaleString(undefined, { maximumFractionDigits: 6 });
 }
 
+/**
+ * For cash-like positions we store:
+ *   quantity = 1
+ *   costBasisPerUnit = initialBalance
+ *   currentPrice = currentBalance
+ *
+ * This helper builds that storage shape from "balance-like" UI fields.
+ */
+function toCashLikeStorageShape(input: {
+  ticker: string;
+  name?: string;
+  assetClass: AssetClass;
+  accountType: AccountType;
+  currentBalance: number; // from UI
+  initialBalance?: number; // from UI (optional)
+  purchaseDate?: string;
+  sector?: string;
+}): Omit<Position, "id" | "currency" | "createdAt"> {
+  const cur = Number(input.currentBalance) || 0;
+  const initRaw = typeof input.initialBalance === "number" ? input.initialBalance : NaN;
+  const init = Number.isFinite(initRaw) && initRaw >= 0 ? initRaw : cur;
+
+  return {
+    ticker: input.ticker,
+    name: input.name,
+    assetClass: input.assetClass,
+    accountType: input.accountType,
+    quantity: 1,
+    costBasisPerUnit: init,
+    currentPrice: cur,
+    currency: "USD",
+    sector: input.sector,
+    purchaseDate: input.purchaseDate,
+  };
+}
+
+/**
+ * For cash-like rows, define:
+ * - currentBalance = valueForPosition(p)
+ * - initialBalance = costBasisPerUnit (if missing, treat as current)
+ */
+function cashBalances(p: Position) {
+  const currentBalance = valueForPosition(p);
+  const initialBalance =
+    typeof p.costBasisPerUnit === "number" && Number.isFinite(p.costBasisPerUnit) && p.costBasisPerUnit >= 0
+      ? p.costBasisPerUnit
+      : currentBalance;
+
+  const change = currentBalance - initialBalance;
+  const pct = initialBalance > 0 ? (change / initialBalance) * 100 : 0;
+
+  return { currentBalance, initialBalance, change, pct };
+}
+
 export default function PositionsCard() {
   const { state, addPosition, updatePosition, deletePosition, exportCSV, exportJSON, refreshPrices } = usePortfolioState();
 
+  // We keep the form shape matching Position (minus id/currency/createdAt),
+  // but for cash-like UI we interpret:
+  //   form.quantity = currentBalance (display)
+  //   form.costBasisPerUnit = initialBalance (display)
+  // and on save convert to storage shape via toCashLikeStorageShape().
   const [form, setForm] = useState<Omit<Position, "id" | "currency" | "createdAt">>({
     ticker: "",
     name: "",
@@ -58,33 +117,81 @@ export default function PositionsCard() {
     return [...state.positions].sort((a, b) => valueForPosition(b) - valueForPosition(a));
   }, [state.positions]);
 
-  function normalizeCashLikeFields<
-    T extends { assetClass: AssetClass; quantity: number; costBasisPerUnit: number; currentPrice?: number }
-  >(obj: T): T {
-    if (!isCashLike(obj.assetClass)) return obj;
-    return {
-      ...obj,
-      costBasisPerUnit: Number.isFinite(obj.costBasisPerUnit) && obj.costBasisPerUnit > 0 ? obj.costBasisPerUnit : 1,
-      currentPrice:
-        typeof obj.currentPrice === "number" && Number.isFinite(obj.currentPrice) && obj.currentPrice > 0 ? obj.currentPrice : 1,
-    };
-  }
-
   function handleAdd() {
-    const cashNormalized = normalizeCashLikeFields({
+    const ticker = form.ticker.trim().toUpperCase();
+    const name = form.name?.trim() || ticker;
+
+    // Cash-like: interpret form.quantity as currentBalance and form.costBasisPerUnit as initialBalance
+    if (isCashLike(form.assetClass)) {
+      const currentBalance = Number(form.quantity) || 0;
+      const initialBalance = Number(form.costBasisPerUnit);
+      const shaped = toCashLikeStorageShape({
+        ticker,
+        name,
+        assetClass: form.assetClass,
+        accountType: form.accountType,
+        currentBalance,
+        initialBalance: Number.isFinite(initialBalance) && initialBalance >= 0 ? initialBalance : undefined,
+        purchaseDate: form.purchaseDate,
+        sector: form.sector,
+      });
+
+      const parsed = positionSchema.safeParse({
+        ...shaped,
+        ticker: shaped.ticker,
+        quantity: shaped.quantity,
+        costBasisPerUnit: shaped.costBasisPerUnit,
+      });
+
+      if (!parsed.success) {
+        const e: Record<string, string> = {};
+        for (const issue of parsed.error.issues) {
+          const path = issue.path.join(".") || "form";
+          e[path] = issue.message;
+        }
+        setErrors(e);
+        return;
+      }
+
+      setErrors({});
+      const now = new Date().toISOString();
+
+      const position: Position = {
+        id: crypto.randomUUID(),
+        ...parsed.data,
+        name,
+        currentPrice: shaped.currentPrice,
+        currency: "USD",
+        sector: shaped.sector,
+        purchaseDate: shaped.purchaseDate,
+        createdAt: now,
+      };
+
+      addPosition(position);
+      void refreshPrices();
+
+      setForm({
+        ticker: "",
+        name: "",
+        assetClass: "Equity",
+        accountType: "Taxable",
+        quantity: 0,
+        costBasisPerUnit: 0,
+        currentPrice: undefined,
+        sector: undefined,
+        purchaseDate: undefined,
+      });
+
+      return;
+    }
+
+    // Non-cash-like: normal behavior
+    const parsed = positionSchema.safeParse({
       ...form,
-      ticker: form.ticker.trim().toUpperCase(),
+      ticker,
+      name,
       quantity: Number(form.quantity),
       costBasisPerUnit: Number(form.costBasisPerUnit),
-      currentPrice: typeof form.currentPrice === "number" ? Number(form.currentPrice) : undefined,
-      purchaseDate: form.purchaseDate || undefined,
-    });
-
-    const parsed = positionSchema.safeParse({
-      ...cashNormalized,
-      ticker: cashNormalized.ticker,
-      quantity: cashNormalized.quantity,
-      costBasisPerUnit: cashNormalized.costBasisPerUnit,
     });
 
     if (!parsed.success) {
@@ -103,15 +210,15 @@ export default function PositionsCard() {
     const position: Position = {
       id: crypto.randomUUID(),
       ticker: parsed.data.ticker,
-      name: cashNormalized.name?.trim() || parsed.data.ticker,
+      name: name,
       assetClass: parsed.data.assetClass,
       accountType: parsed.data.accountType,
       quantity: parsed.data.quantity,
       costBasisPerUnit: parsed.data.costBasisPerUnit,
-      currentPrice: cashNormalized.currentPrice,
+      currentPrice: typeof form.currentPrice === "number" ? Number(form.currentPrice) : undefined,
       currency: "USD",
-      sector: cashNormalized.sector,
-      purchaseDate: cashNormalized.purchaseDate,
+      sector: form.sector,
+      purchaseDate: form.purchaseDate,
       createdAt: now,
     };
 
@@ -138,30 +245,79 @@ export default function PositionsCard() {
   function applyEdit() {
     if (!editing) return;
 
-    const cashNormalized = normalizeCashLikeFields({
-      ...editing,
+    // Cash-like: editing.quantity input should represent current balance for UI,
+    // but editing object in state is stored as qty=1, costBasisPerUnit=init, currentPrice=cur.
+    if (isCashLike(editing.assetClass)) {
+      // If user edited in this dialog, we will read:
+      // - "Balance ($)" field = editing.currentPrice (we’ll wire in UI below)
+      // - "Initial balance ($)" field = editing.costBasisPerUnit
+      const ticker = (editing.ticker || "").toUpperCase();
+
+      const curBal =
+        typeof editing.currentPrice === "number" && Number.isFinite(editing.currentPrice)
+          ? editing.currentPrice
+          : valueForPosition(editing);
+
+      const initBal = Number(editing.costBasisPerUnit);
+      const shaped = toCashLikeStorageShape({
+        ticker,
+        name: editing.name,
+        assetClass: editing.assetClass,
+        accountType: editing.accountType,
+        currentBalance: curBal,
+        initialBalance: Number.isFinite(initBal) && initBal >= 0 ? initBal : undefined,
+        purchaseDate: editing.purchaseDate,
+        sector: editing.sector,
+      });
+
+      const parsed = positionSchema.safeParse({
+        ...shaped,
+        ticker: shaped.ticker,
+        quantity: shaped.quantity,
+        costBasisPerUnit: shaped.costBasisPerUnit,
+      });
+
+      if (!parsed.success) return;
+
+      updatePosition({
+        ...editing,
+        ticker,
+        quantity: 1,
+        costBasisPerUnit: shaped.costBasisPerUnit,
+        currentPrice: shaped.currentPrice,
+      });
+
+      setEditing(null);
+      return;
+    }
+
+    // Non-cash-like: normal edit validation
+    const parsed = positionSchema.safeParse({
+      ticker: editing.ticker,
+      name: editing.name,
+      assetClass: editing.assetClass,
+      accountType: editing.accountType,
       quantity: Number(editing.quantity),
       costBasisPerUnit: Number(editing.costBasisPerUnit),
-      currentPrice: typeof editing.currentPrice === "number" ? Number(editing.currentPrice) : undefined,
-      purchaseDate: editing.purchaseDate || undefined,
-    });
-
-    const parsed = positionSchema.safeParse({
-      ticker: cashNormalized.ticker,
-      name: cashNormalized.name,
-      assetClass: cashNormalized.assetClass,
-      accountType: cashNormalized.accountType,
-      quantity: Number(cashNormalized.quantity),
-      costBasisPerUnit: Number(cashNormalized.costBasisPerUnit),
     });
 
     if (!parsed.success) return;
 
-    updatePosition({ ...cashNormalized });
+    updatePosition({
+      ...editing,
+      ticker: editing.ticker.toUpperCase(),
+      quantity: Number(editing.quantity),
+      costBasisPerUnit: Number(editing.costBasisPerUnit),
+      currentPrice: typeof editing.currentPrice === "number" ? Number(editing.currentPrice) : undefined,
+    });
+
     setEditing(null);
   }
 
   const preview = useMemo(() => {
+    // Preview is only meaningful for non-cash-like (investment P/L)
+    if (isCashLike(form.assetClass)) return null;
+
     const qty = Number(form.quantity) || 0;
     const cost = Number(form.costBasisPerUnit) || 0;
     const current = typeof form.currentPrice === "number" ? Number(form.currentPrice) : undefined;
@@ -175,7 +331,7 @@ export default function PositionsCard() {
     const plPct = costTotal > 0 ? (plDollar / costTotal) * 100 : 0;
 
     return { value, plDollar, plPct };
-  }, [form.quantity, form.costBasisPerUnit, form.currentPrice]);
+  }, [form.assetClass, form.quantity, form.costBasisPerUnit, form.currentPrice]);
 
   return (
     <Card className="w-full">
@@ -230,7 +386,6 @@ export default function PositionsCard() {
 
       <CardContent className="space-y-5">
         <div className="space-y-3">
-          {/* ✅ Added Purchase Date field; grid expanded to 9 columns */}
           <div className="grid grid-cols-1 sm:grid-cols-9 gap-3">
             <div className="sm:col-span-1">
               <label className="block text-sm mb-1">Ticker</label>
@@ -265,59 +420,51 @@ export default function PositionsCard() {
               </Select>
             </div>
 
+            {/* Quantity / Balance */}
             <div>
-              <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Balance ($)" : "Quantity"}</label>
+              <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Current balance ($)" : "Quantity"}</label>
               <Input
                 type="number"
                 value={form.quantity}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    quantity: Number(e.target.value),
-                    ...(isCashLike(form.assetClass)
-                      ? {
-                          costBasisPerUnit: form.costBasisPerUnit || 1,
-                          currentPrice: form.currentPrice ?? 1,
-                        }
-                      : {}),
-                  })
-                }
+                onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })}
               />
               {errors.quantity && <p className="text-xs text-red-600 mt-1">{errors.quantity}</p>}
             </div>
 
+            {/* Initial price / Initial balance */}
             <div>
-              <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Initial price ($)" : "Initial price"}</label>
+              <label className="block text-sm mb-1">{isCashLike(form.assetClass) ? "Initial balance ($)" : "Initial price"}</label>
               <Input
                 type="number"
-                value={isCashLike(form.assetClass) ? form.costBasisPerUnit || 1 : form.costBasisPerUnit}
+                value={form.costBasisPerUnit}
                 onChange={(e) => setForm({ ...form, costBasisPerUnit: Number(e.target.value) })}
               />
               {errors.costBasisPerUnit && <p className="text-xs text-red-600 mt-1">{errors.costBasisPerUnit}</p>}
-              {isCashLike(form.assetClass) && <p className="text-xs text-gray-600 mt-1">Usually $1.00 for money markets.</p>}
+              {isCashLike(form.assetClass) && (
+                <p className="text-xs text-gray-600 mt-1">
+                  Use Initial = starting balance, Current balance above = today’s balance.
+                </p>
+              )}
             </div>
 
-            <div>
+            {/* Current price (non-cash only) */}
+            <div className="hidden sm:block">
               <label className="block text-sm mb-1">Current price</label>
               <Input
                 type="number"
-                value={
-                  isCashLike(form.assetClass)
-                    ? form.currentPrice ?? 1
-                    : typeof form.currentPrice === "number"
-                      ? form.currentPrice
-                      : ""
-                }
-                placeholder={isCashLike(form.assetClass) ? "" : "Auto-fetch"}
+                value={isCashLike(form.assetClass) ? "" : typeof form.currentPrice === "number" ? form.currentPrice : ""}
+                placeholder={isCashLike(form.assetClass) ? "—" : "Auto-fetch"}
                 onChange={(e) =>
                   setForm({
                     ...form,
                     currentPrice: e.target.value === "" ? undefined : Number(e.target.value),
                   })
                 }
+                disabled={isCashLike(form.assetClass)}
               />
             </div>
 
+            {/* Purchase date */}
             <div>
               <label className="block text-sm mb-1">Purchase date</label>
               <Input
@@ -365,13 +512,13 @@ export default function PositionsCard() {
                   <th className="px-2 py-2 min-w-[240px]">Name</th>
                   <th className="px-2 py-2 hidden md:table-cell w-[110px]">Asset</th>
                   <th className="px-2 py-2 hidden lg:table-cell w-[140px]">Account</th>
-                  {/* ✅ New column */}
-                  <th className="px-2 py-2 hidden xl:table-cell w-[120px]">Purchase</th>
                   <th className="px-2 py-2 text-right hidden md:table-cell w-[90px]">Qty</th>
                   <th className="px-2 py-2 text-right hidden md:table-cell w-[110px]">Initial</th>
                   <th className="px-2 py-2 text-right hidden lg:table-cell w-[110px]">Current</th>
                   <th className="px-2 py-2 text-right w-[110px]">Value</th>
-                  <th className="px-2 py-2 text-right hidden sm:table-cell w-[110px]">P/L</th>
+                  <th className="px-2 py-2 text-right hidden sm:table-cell w-[110px]">
+                    P/L
+                  </th>
                   <th className="px-2 py-2 text-right w-[170px]">Actions</th>
                 </tr>
               </thead>
@@ -379,16 +526,27 @@ export default function PositionsCard() {
               <tbody>
                 {sortedPositions.length === 0 ? (
                   <tr>
-                    <td colSpan={11} className="px-2 py-6 text-center text-gray-600">
-                      Add your first position (e.g., AAPL, VOO, BTCUSD).
+                    <td colSpan={10} className="px-2 py-6 text-center text-gray-600">
+                      Add your first position (e.g., AAPL, VOO, BTC-USD).
                     </td>
                   </tr>
                 ) : (
                   sortedPositions.map((p) => {
+                    const cashLike = isCashLike(p.assetClass);
+
+                    // Current "value" for table should be current balance for cash-like
                     const value = valueForPosition(p);
+
+                    // Non-cash P/L math
                     const costTotal = p.costBasisPerUnit * p.quantity;
                     const plDollar = value - costTotal;
                     const plPct = costTotal > 0 ? (plDollar / costTotal) * 100 : 0;
+
+                    // Cash-like balance change
+                    const bal = cashLike ? cashBalances(p) : null;
+
+                    const displayPLDollar = cashLike ? (bal?.change ?? 0) : plDollar;
+                    const displayPLPct = cashLike ? (bal?.pct ?? 0) : plPct;
 
                     return (
                       <tr key={p.id} className="border-t align-top">
@@ -400,7 +558,6 @@ export default function PositionsCard() {
 
                             <div className="mt-1 text-xs text-gray-500 md:hidden">
                               {p.assetClass} • {p.accountType} • Qty {fmtQty(p.quantity)}
-                              {p.purchaseDate ? ` • ${p.purchaseDate}` : ""}
                             </div>
                           </div>
                         </td>
@@ -408,28 +565,38 @@ export default function PositionsCard() {
                         <td className="px-2 py-3 hidden md:table-cell">{p.assetClass}</td>
                         <td className="px-2 py-3 hidden lg:table-cell">{p.accountType}</td>
 
-                        {/* ✅ New cell */}
-                        <td className="px-2 py-3 hidden xl:table-cell">
-                          {p.purchaseDate ?? "—"}
+                        <td className="px-2 py-3 text-right hidden md:table-cell">
+                          {cashLike ? "—" : fmtQty(p.quantity)}
                         </td>
 
-                        <td className="px-2 py-3 text-right hidden md:table-cell">{fmtQty(p.quantity)}</td>
-                        <td className="px-2 py-3 text-right hidden md:table-cell">{fmtMoney(p.costBasisPerUnit)}</td>
+                        {/* Initial */}
+                        <td className="px-2 py-3 text-right hidden md:table-cell">
+                          {cashLike ? fmtMoney(bal?.initialBalance ?? p.costBasisPerUnit) : fmtMoney(p.costBasisPerUnit)}
+                        </td>
+
+                        {/* Current */}
                         <td className="px-2 py-3 text-right hidden lg:table-cell">
-                          {typeof p.currentPrice === "number" ? fmtMoney(p.currentPrice) : "—"}
+                          {cashLike ? fmtMoney(bal?.currentBalance ?? value) : (typeof p.currentPrice === "number" ? fmtMoney(p.currentPrice) : "—")}
                         </td>
 
+                        {/* Value */}
                         <td className="px-2 py-3 text-right font-medium">{fmtMoney(value)}</td>
 
-                        <td className={`px-2 py-3 text-right hidden sm:table-cell ${plDollar >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                        {/* P/L or Balance Change */}
+                        <td className={`px-2 py-3 text-right hidden sm:table-cell ${displayPLDollar >= 0 ? "text-emerald-600" : "text-red-600"}`}>
                           <div className="font-medium">
-                            {plDollar >= 0 ? "+" : ""}
-                            {fmtMoney(plDollar)}
+                            {displayPLDollar >= 0 ? "+" : ""}
+                            {fmtMoney(displayPLDollar)}
                           </div>
                           <div className="text-xs">
-                            {plPct >= 0 ? "+" : ""}
-                            {plPct.toFixed(2)}%
+                            {displayPLPct >= 0 ? "+" : ""}
+                            {displayPLPct.toFixed(2)}%
                           </div>
+                          {cashLike && (
+                            <div className="text-[11px] text-gray-500 mt-1">
+                              Balance change
+                            </div>
+                          )}
                         </td>
 
                         <td className="px-2 py-3">
@@ -443,14 +610,15 @@ export default function PositionsCard() {
                           </div>
 
                           <div className="sm:hidden mt-2 text-right text-xs">
-                            <span className={plDollar >= 0 ? "text-emerald-600 font-medium" : "text-red-600 font-medium"}>
-                              {plDollar >= 0 ? "+" : ""}
-                              {fmtMoney(plDollar)}
+                            <span className={displayPLDollar >= 0 ? "text-emerald-600 font-medium" : "text-red-600 font-medium"}>
+                              {displayPLDollar >= 0 ? "+" : ""}
+                              {fmtMoney(displayPLDollar)}
                             </span>{" "}
                             <span className="text-gray-500">
-                              ({plPct >= 0 ? "+" : ""}
-                              {plPct.toFixed(2)}%)
+                              ({displayPLPct >= 0 ? "+" : ""}
+                              {displayPLPct.toFixed(2)}%)
                             </span>
+                            {cashLike && <div className="text-[11px] text-gray-500 mt-1">Balance change</div>}
                           </div>
                         </td>
                       </tr>
@@ -506,29 +674,21 @@ export default function PositionsCard() {
               {isCashLike(editing.assetClass) ? (
                 <>
                   <div>
-                    <label className="block text-sm mb-1">Balance ($)</label>
+                    <label className="block text-sm mb-1">Initial balance ($)</label>
                     <Input
                       type="number"
-                      value={editing.quantity}
-                      onChange={(e) =>
-                        setEditing({
-                          ...editing,
-                          quantity: Number(e.target.value),
-                          costBasisPerUnit: editing.costBasisPerUnit || 1,
-                          currentPrice: editing.currentPrice ?? 1,
-                        })
-                      }
+                      value={editing.costBasisPerUnit}
+                      onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })}
                     />
                   </div>
 
                   <div>
-                    <label className="block text-sm mb-1">Initial price ($)</label>
-                    <Input type="number" value={editing.costBasisPerUnit || 1} onChange={(e) => setEditing({ ...editing, costBasisPerUnit: Number(e.target.value) })} />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm mb-1">Current price ($)</label>
-                    <Input type="number" value={editing.currentPrice ?? 1} onChange={(e) => setEditing({ ...editing, currentPrice: Number(e.target.value) })} />
+                    <label className="block text-sm mb-1">Current balance ($)</label>
+                    <Input
+                      type="number"
+                      value={typeof editing.currentPrice === "number" ? editing.currentPrice : valueForPosition(editing)}
+                      onChange={(e) => setEditing({ ...editing, currentPrice: Number(e.target.value) })}
+                    />
                   </div>
                 </>
               ) : (

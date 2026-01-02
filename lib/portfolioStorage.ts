@@ -34,55 +34,36 @@ function isCashLikePosition(p: Position): boolean {
 }
 
 /**
- * Normalize date strings into YYYY-MM-DD if possible.
- * Accepts:
- * - YYYY-MM-DD (passes through)
- * - M/D/YYYY or MM/DD/YYYY (converts)
- */
-function normalizeDateISO(input: unknown): string | undefined {
-  if (!isString(input)) return undefined;
-  const s = input.trim();
-  if (!s) return undefined;
-
-  // YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-
-  // M/D/YYYY or MM/DD/YYYY
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) {
-    const mm = m[1].padStart(2, "0");
-    const dd = m[2].padStart(2, "0");
-    const yyyy = m[3];
-    return `${yyyy}-${mm}-${dd}`;
-  }
-
-  return undefined;
-}
-
-/**
- * For Money Market / Cash we treat value as "balance".
- * The app stores these in a few possible ways depending on import/UI:
- *  - Typical: quantity=1, currentPrice=1, costBasisPerUnit=balance
- *  - Alternate: quantity=balance, currentPrice≈1, costBasisPerUnit≈1
+ * For Money Market / Cash we treat value as "current balance".
  *
- * This helper makes value calculation robust across those.
+ * Supported storage styles:
+ *  A) qty=1, costBasisPerUnit=initialBalance, currentPrice=currentBalance
+ *  B) qty=1, costBasisPerUnit=balance, currentPrice≈1 (legacy)
+ *  C) qty=balance, currentPrice≈1 (legacy alt)
+ *
+ * This helper returns the *current balance* robustly across those.
  */
 function cashLikeValue(p: Position): number {
   const qty = Number(p.quantity) || 0;
   const cp = isNumber(p.currentPrice) ? p.currentPrice : undefined;
   const cb = isNumber(p.costBasisPerUnit) ? p.costBasisPerUnit : 0;
 
-  // Style A: balance stored in costBasisPerUnit (qty=1, price=1)
+  // If qty=1 and currentPrice looks like a balance (>> 1), treat that as current balance (Style A)
+  if (qty === 1 && typeof cp === "number" && cp > 1.0001) {
+    return cp;
+  }
+
+  // Legacy Style B: balance stored in costBasisPerUnit (qty=1, currentPrice≈1 or missing)
   if (qty === 1 && (cp === undefined || Math.abs(cp - 1) < 1e-9)) {
     return cb > 0 ? cb : 0;
   }
 
-  // Style B: balance stored in quantity (price≈1)
+  // Legacy Style C: balance stored in quantity (currentPrice≈1)
   if (cp === undefined || Math.abs(cp - 1) < 1e-9) {
     return qty > 0 ? qty : 0;
   }
 
-  // If a real price exists (rare for MM), fall back to qty * price
+  // Rare case: if a real price exists, fall back to qty * price
   return qty * cp;
 }
 
@@ -90,7 +71,7 @@ function normalizeLoadedState(raw: unknown): PortfolioState | null {
   if (!isRecord(raw)) return null;
 
   const profile = (raw["profile"] as PortfolioState["profile"]) ?? null;
-  const positionsRaw = Array.isArray(raw["positions"]) ? (raw["positions"] as Position[]) : [];
+  const positions = Array.isArray(raw["positions"]) ? (raw["positions"] as Position[]) : [];
   const snapshots = Array.isArray(raw["snapshots"]) ? (raw["snapshots"] as PortfolioSnapshot[]) : [];
   const lastUpdated = isString(raw["lastUpdated"]) ? raw["lastUpdated"] : undefined;
 
@@ -98,15 +79,6 @@ function normalizeLoadedState(raw: unknown): PortfolioState | null {
   const transactions = Array.isArray(raw["transactions"])
     ? (raw["transactions"] as PortfolioState["transactions"])
     : [];
-
-  // ✅ Normalize purchaseDate so history logic can trust it
-  const positions: Position[] = positionsRaw.map((p) => {
-    const normalized = normalizeDateISO((p as any).purchaseDate);
-    return {
-      ...p,
-      purchaseDate: normalized ?? undefined,
-    };
-  });
 
   return {
     profile,
@@ -142,7 +114,7 @@ export function getInitialState(): PortfolioState {
 /**
  * Compute the current value of a position.
  * - Non-cash-like: value = quantity * (currentPrice ?? costBasisPerUnit)
- * - Cash-like (Money Market / Cash): value = balance (robust across stored styles)
+ * - Cash-like (Money Market / Cash): value = current balance (robust)
  */
 export function valueForPosition(p: Position): number {
   if (isCashLikePosition(p)) return cashLikeValue(p);
@@ -167,7 +139,8 @@ export function computeSnapshot(state: PortfolioState): PortfolioSnapshot {
 
   let totalValue = 0;
 
-  // Gain/Loss computed ONLY for non-cash-like holdings.
+  // Gain/Loss should be computed ONLY for non-cash-like holdings.
+  // Money Market / Cash is treated as "balance", not an investment with unrealized P/L.
   let investedValue = 0;
   let investedCost = 0;
 
@@ -178,7 +151,9 @@ export function computeSnapshot(state: PortfolioState): PortfolioSnapshot {
     byAssetClass[pos.assetClass] = (byAssetClass[pos.assetClass] ?? 0) + value;
     byAccountType[pos.accountType] = (byAccountType[pos.accountType] ?? 0) + value;
 
-    if (isCashLikePosition(pos)) continue;
+    if (isCashLikePosition(pos)) {
+      continue; // exclude from gain/loss math
+    }
 
     const qty = Number(pos.quantity) || 0;
     const costPerUnit = Number(pos.costBasisPerUnit) || 0;
