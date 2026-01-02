@@ -22,12 +22,13 @@ type ChartMode = "dollar" | "percent";
 type Timeframe = "all" | "1m" | "1y";
 
 type HistoryPoint = { date: string; close: number };
+
 type HistoryResponse = {
   tickers: string[];
   interval: "1d" | "1wk" | "1mo";
   start?: string;
   end?: string;
-  data: Record<string, HistoryPoint[]>;
+  data: Record<string, { points: HistoryPoint[]; error?: string }>;
 };
 
 function fmtSignedPct(n: number, decimals = 2) {
@@ -64,7 +65,7 @@ async function fetchHistoryTicker(opts: {
   end: string;
   interval: "1d" | "1wk" | "1mo";
   timeoutMs?: number;
-}): Promise<HistoryPoint[]> {
+}): Promise<{ points: HistoryPoint[]; error?: string }> {
   const { ticker, start, end, interval, timeoutMs = 12000 } = opts;
 
   const qs = new URLSearchParams();
@@ -78,12 +79,20 @@ async function fetchHistoryTicker(opts: {
 
   try {
     const res = await fetch(`/api/history?${qs.toString()}`, { cache: "no-store", signal: controller.signal });
-    if (!res.ok) return [];
+    if (!res.ok) return { points: [], error: `HTTP ${res.status}` };
 
     const json = (await res.json()) as HistoryResponse;
-    return (json?.data?.[ticker] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
-  } catch {
-    return [];
+
+    // Some providers normalize tickers; safest is to use the first returned ticker key if available
+    const key = (json?.tickers?.[0] ?? ticker).toUpperCase();
+
+    const payload = json?.data?.[key] ?? json?.data?.[ticker] ?? null;
+    const points = (payload?.points ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
+    const error = payload?.error;
+
+    return { points, error };
+  } catch (e) {
+    return { points: [], error: e instanceof Error ? e.message : "Fetch failed" };
   } finally {
     clearTimeout(t);
   }
@@ -97,13 +106,25 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
 
   return (
     <div className="flex items-center gap-2">
-      <button type="button" className={`${pillBase} ${value === "all" ? active : inactive}`} onClick={() => onChange("all")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "all" ? active : inactive}`}
+        onClick={() => onChange("all")}
+      >
         All
       </button>
-      <button type="button" className={`${pillBase} ${value === "1m" ? active : inactive}`} onClick={() => onChange("1m")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1m" ? active : inactive}`}
+        onClick={() => onChange("1m")}
+      >
         1M
       </button>
-      <button type="button" className={`${pillBase} ${value === "1y" ? active : inactive}`} onClick={() => onChange("1y")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1y" ? active : inactive}`}
+        onClick={() => onChange("1y")}
+      >
         1Y
       </button>
     </div>
@@ -210,6 +231,7 @@ export default function OverviewTab() {
 
   const [benchLoading, setBenchLoading] = useState(false);
   const [benchSeries, setBenchSeries] = useState<{ date: string; close: number }[]>([]);
+  const [benchError, setBenchError] = useState<string | null>(null);
 
   const [reloadNonce, setReloadNonce] = useState(0);
 
@@ -268,6 +290,8 @@ export default function OverviewTab() {
     const benchReqId = ++benchReqIdRef.current;
 
     async function runBench() {
+      setBenchError(null);
+
       if (!showBenchmark || filteredHistorySeries.length < 2) {
         if (benchReqId !== benchReqIdRef.current) return;
         setBenchSeries([]);
@@ -279,10 +303,13 @@ export default function OverviewTab() {
       const end = filteredHistorySeries[filteredHistorySeries.length - 1].date;
 
       setBenchLoading(true);
-      const raw = await fetchHistoryTicker({ ticker: "SPY", start, end, interval: "1d" });
+
+      const { points, error } = await fetchHistoryTicker({ ticker: "SPY", start, end, interval: "1d" });
 
       if (benchReqId !== benchReqIdRef.current) return;
-      setBenchSeries(raw);
+
+      setBenchSeries(points);
+      setBenchError(error ?? null);
       setBenchLoading(false);
     }
 
@@ -369,7 +396,6 @@ export default function OverviewTab() {
 
     const { ticks, domain } = niceTicks(yMin - pad, yMax + pad, 5, mode);
 
-    // ---- True performance (timeframe-aware) ----
     const flowsAll = cashFlowsFromTransactions(state.transactions ?? []);
     const perfSeries = filteredHistorySeries.map((p) => ({ date: p.date, value: p.value }));
 
@@ -381,13 +407,12 @@ export default function OverviewTab() {
       .filter((f) => (!cutoffISO ? true : f.date >= cutoffISO))
       .filter((f) => f.date <= terminalDate);
 
-    const twrValue = perfSeries.length >= 2 ? twr(perfSeries, flowsTf) : null; // cumulative fraction
+    const twrValue = perfSeries.length >= 2 ? twr(perfSeries, flowsTf) : null;
     const irrFlows = xirrCashFlowsWithTerminalValue(flowsTf, terminalDate, terminalValue);
-    const xirrValue = xirr(irrFlows); // annualized fraction
+    const xirrValue = xirr(irrFlows);
 
     const netContrib = sumNetContributions(state.transactions ?? [], cutoffISO, terminalDate);
 
-    // ---- Contribution vs Market Growth (timeframe-aware) ----
     const tfStartValue = perfSeries.length ? perfSeries[0].value : 0;
     const tfEndValue = perfSeries.length ? perfSeries.at(-1)!.value : 0;
     const tfTotalChange = tfEndValue - tfStartValue;
@@ -429,24 +454,23 @@ export default function OverviewTab() {
     const hasAnyTx = Array.isArray(state.transactions) && state.transactions.length > 0;
     const hasAnyFlow = flowsAll.some((f) => Number(f?.amount) !== 0);
 
-    // ---- Risk metrics (computed off aligned dollars) ----
     const portSeriesForRisk = aligned.map((p) => ({ date: p.d, value: p.totalDollar }));
     const portR = dailyReturns(portSeriesForRisk).map((x) => x.r);
 
-    const riskVol = annualizedVolatility(portR); // fraction
-    const riskMdd = maxDrawdown(portSeriesForRisk); // negative fraction
+    const riskVol = annualizedVolatility(portR);
+    const riskMdd = maxDrawdown(portSeriesForRisk);
 
     let riskBeta: number | null = null;
     let betaSamples = 0;
-    
+
     if (showBenchmark) {
       const benchSeriesForRisk = aligned
         .filter((p) => typeof p.benchDollar === "number" && p.benchDollar !== null)
         .map((p) => ({ date: p.d, value: p.benchDollar as number }));
-    
+
       const portRetSeries = dailyReturns(portSeriesForRisk);
       const benchRetSeries = dailyReturns(benchSeriesForRisk);
-    
+
       const betaRes = betaFromReturnSeries(portRetSeries, benchRetSeries, 20);
       riskBeta = betaRes.beta;
       betaSamples = betaRes.n;
@@ -460,21 +484,20 @@ export default function OverviewTab() {
         sinceStartDollar,
         sinceStartPercent,
 
-        twr: twrValue, // fraction
-        xirr: typeof xirrValue === "number" && Number.isFinite(xirrValue) ? xirrValue : null, // fraction
+        twr: twrValue,
+        xirr: typeof xirrValue === "number" && Number.isFinite(xirrValue) ? xirrValue : null,
         netContrib,
         hasTx: hasAnyTx,
         hasFlows: hasAnyFlow,
 
-        // Task A
         tfStartValue,
         tfEndValue,
         tfTotalChange,
         tfMarketGrowth,
 
-        riskVol, // fraction
-        riskMdd, // negative fraction
-        riskBeta, // number
+        riskVol,
+        riskMdd,
+        riskBeta,
         betaSamples,
       },
       chartData: aligned,
@@ -536,9 +559,7 @@ export default function OverviewTab() {
       )}
     </span>
   );
-  
 
-  // ---- Task A UI helpers (stacked bar) ----
   const contribAbs = Math.abs(kpis.netContrib ?? 0);
   const growthAbs = Math.abs(kpis.tfMarketGrowth ?? 0);
   const denom = Math.max(contribAbs + growthAbs, 1);
@@ -552,7 +573,6 @@ export default function OverviewTab() {
 
   return (
     <div className="space-y-4">
-      {/* 6-up on desktop so True Performance + Risk Metrics fit cleanly */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard title="Total Portfolio Value" value={fmtMoney(kpis.totalValue)} />
 
@@ -580,8 +600,6 @@ export default function OverviewTab() {
           subValueClassName={kpis.sinceStartPercent >= 0 ? "text-emerald-600" : "text-red-600"}
         />
 
-        
-
         <MetricCard
           title={`True Performance${timeframe === "all" ? "" : timeframe === "1m" ? " (1M)" : " (1Y)"}`}
           value={typeof kpis.twr === "number" ? fmtSignedPct(kpis.twr * 100, 2) : "—"}
@@ -599,7 +617,6 @@ export default function OverviewTab() {
         />
       </div>
 
-      {/* Task A: Contribution vs Market Growth */}
       <Card>
         <CardContent className="p-5">
           <div className="flex items-start justify-between gap-4">
@@ -636,7 +653,6 @@ export default function OverviewTab() {
                 </div>
               </div>
 
-              {/* Stacked bar (uses absolute contribution/growth for proportions) */}
               <div className="mt-4">
                 <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100 border">
                   <div className="h-full flex">
@@ -683,7 +699,12 @@ export default function OverviewTab() {
           <TimeframePills value={timeframe} onChange={setTimeframe} />
 
           <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-2 text-sm text-gray-700 select-none">
-            <input type="checkbox" className="h-4 w-4" checked={showBenchmark} onChange={(e) => setShowBenchmark(e.target.checked)} />
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={showBenchmark}
+              onChange={(e) => setShowBenchmark(e.target.checked)}
+            />
             <span className="font-medium">S&amp;P 500</span>
           </label>
         </div>
@@ -745,13 +766,19 @@ export default function OverviewTab() {
                         <div className="space-y-1 mb-2">
                           <div className="flex justify-between gap-6">
                             <span className="text-gray-600">Portfolio</span>
-                            <span className="font-semibold">{mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}</span>
+                            <span className="font-semibold">
+                              {mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}
+                            </span>
                           </div>
 
                           {showBenchmark && point.b !== null && (
                             <div className="flex justify-between gap-6">
                               <span className="text-gray-600">S&amp;P 500 (SPY)</span>
-                              <span className="font-semibold">{mode === "dollar" ? fmtMoney(point.benchDollar ?? 0) : `${fmtNumber(point.benchPct ?? 0, 2)}%`}</span>
+                              <span className="font-semibold">
+                                {mode === "dollar"
+                                  ? fmtMoney(point.benchDollar ?? 0)
+                                  : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
+                              </span>
                             </div>
                           )}
                         </div>
@@ -796,6 +823,9 @@ export default function OverviewTab() {
           )}
 
           {showBenchmark && benchLoading && <p className="mt-2 text-xs text-gray-500">Loading benchmark (SPY)…</p>}
+          {showBenchmark && !benchLoading && benchError && (
+            <p className="mt-2 text-xs text-red-600">Benchmark error: {benchError}</p>
+          )}
         </CardContent>
       </Card>
 

@@ -1,17 +1,16 @@
 // app/api/history/route.ts
 import { NextResponse } from "next/server";
-import yahooFinance from "yahoo-finance2";
 
 export const runtime = "nodejs";
 
 type Interval = "1d" | "1wk" | "1mo";
-
 type Point = { date: string; close: number };
-type Cached = { ts: number; points: Point[]; error?: string };
 
+type Cached = { ts: number; points: Point[]; error?: string };
 const CACHE = new Map<string, Cached>();
-const CACHE_TTL_MS = 1000 * 60 * 30; // 30 min
-const CACHE_STALE_OK_MS = 1000 * 60 * 60 * 6; // allow up to 6h stale on rate-limit
+
+// Longer cache is totally fine for history
+const CACHE_TTL_MS = 1000 * 60 * 60 * 6; // 6 hours
 
 function isISODate(s?: string | null): s is string {
   return !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -22,69 +21,158 @@ function parseInterval(v: string | null): Interval {
   return "1d";
 }
 
-function normalizeTicker(t: string) {
-  const up = t.trim().toUpperCase();
-  if (up.includes("/")) return up.replace("/", "-");
-  return up;
-}
-
 function cacheKey(ticker: string, start: string, end: string, interval: Interval) {
   return `${ticker}|${start}|${end}|${interval}`;
 }
 
-async function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
+function normalizeTicker(t: string) {
+  return String(t || "").trim().toUpperCase();
 }
 
-function looksRateLimited(err: any) {
-  const msg = String(err?.message || err || "").toLowerCase();
-  const code = err?.code || err?.name;
-  return (
-    msg.includes("too many requests") ||
-    msg.includes("rate limit") ||
-    msg.includes("429") ||
-    code === 429
-  );
+function isCryptoTicker(t: string) {
+  // Supports BTC-USD, ETH-USD, BTC/USD
+  const up = normalizeTicker(t).replace("/", "-");
+  return up.endsWith("-USD");
 }
 
-async function fetchHistoricalWithRetry(
-  ticker: string,
-  start: string,
-  end: string,
-  interval: Interval
-): Promise<{ points: Point[]; error?: string; rateLimited?: boolean }> {
-  const period1 = new Date(start + "T00:00:00Z");
-  const period2 = new Date(end + "T00:00:00Z");
+/**
+ * Stooq uses symbols like:
+ *   VOO.US, NVDA.US, SPY.US, AMZN.US
+ * We’ll default to US for normal equities/ETFs.
+ * If you later want international, we can expand mapping.
+ */
+function toStooqSymbol(ticker: string) {
+  const t = normalizeTicker(ticker);
+  // If user already passed .US or .DE etc, keep it
+  if (t.includes(".")) return t.toLowerCase();
+  return `${t}.US`.toLowerCase();
+}
 
-  const opts: any = { period1, period2, interval };
+function isoToUnixSeconds(iso: string) {
+  return Math.floor(new Date(iso + "T00:00:00Z").getTime() / 1000);
+}
 
-  // More patient backoff (helps on Vercel)
-  const waits = [0, 800, 2000, 5000];
-  let lastErr: any = null;
+function filterByRange(points: Point[], start: string, end: string) {
+  return points.filter((p) => p.date >= start && p.date <= end);
+}
 
-  for (const wait of waits) {
-    if (wait) await sleep(wait);
-    try {
-      const raw = (await yahooFinance.historical(ticker, opts)) as any;
+/** Downsample daily points to week-end/month-end (last point in bucket) */
+function takeWeekEnd(points: Point[]): Point[] {
+  const map: Record<string, Point> = {};
+  for (const p of points) {
+    const dt = new Date(p.date + "T00:00:00Z");
+    const year = dt.getUTCFullYear();
+    const firstJan = new Date(Date.UTC(year, 0, 1));
+    const days = Math.floor((dt.getTime() - firstJan.getTime()) / 86400000);
+    const week = Math.floor((days + firstJan.getUTCDay()) / 7);
+    map[`${year}-W${week}`] = p; // last in bucket wins
+  }
+  return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
+}
 
-      const rows: any[] = Array.isArray(raw) ? raw : [];
-      const points = rows
-        .filter((r) => r?.date && typeof r?.close === "number")
-        .map((r) => ({
-          date: new Date(r.date).toISOString().slice(0, 10),
-          close: Number(r.close),
-        }))
-        .sort((a, b) => a.date.localeCompare(b.date));
+function takeMonthEnd(points: Point[]): Point[] {
+  const map: Record<string, Point> = {};
+  for (const p of points) {
+    const dt = new Date(p.date + "T00:00:00Z");
+    map[`${dt.getUTCFullYear()}-${dt.getUTCMonth()}`] = p; // last in bucket wins
+  }
+  return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
+}
 
-      return { points };
-    } catch (e: any) {
-      lastErr = e;
-      if (!looksRateLimited(e)) break;
-    }
+function downsample(points: Point[], interval: Interval) {
+  if (interval === "1wk") return takeWeekEnd(points);
+  if (interval === "1mo") return takeMonthEnd(points);
+  return points;
+}
+
+/**
+ * Fetch daily OHLC from Stooq (CSV).
+ * Endpoint format:
+ *   https://stooq.com/q/d/l/?s=voo.us&i=d
+ */
+async function fetchStooqDaily(ticker: string): Promise<Point[]> {
+  const sym = toStooqSymbol(ticker);
+  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(sym)}&i=d`;
+
+  const res = await fetch(url, {
+    // Stooq is public; caching OK server-side
+    cache: "no-store",
+  });
+
+  if (!res.ok) throw new Error(`Stooq fetch failed (${res.status})`);
+
+  const text = await res.text();
+  const lines = text.trim().split("\n");
+  // header: Date,Open,High,Low,Close,Volume
+  if (lines.length <= 1) return [];
+
+  const out: Point[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(",");
+    const date = parts[0]?.trim();
+    const closeStr = parts[4]?.trim();
+    const close = Number(closeStr);
+    if (!date || !Number.isFinite(close)) continue;
+    // Stooq uses YYYY-MM-DD already
+    out.push({ date, close });
   }
 
-  const message = String(lastErr?.message || lastErr || "Unknown error");
-  return { points: [], error: message, rateLimited: looksRateLimited(lastErr) };
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/**
+ * CoinGecko mapping for common tickers.
+ * If you want more coins later, we can add a lookup endpoint.
+ */
+function toCoinGeckoId(ticker: string): string | null {
+  const t = normalizeTicker(ticker).replace("/", "-");
+  if (t.startsWith("BTC-")) return "bitcoin";
+  if (t.startsWith("ETH-")) return "ethereum";
+  return null;
+}
+
+/**
+ * Fetch crypto daily close from CoinGecko.
+ * market_chart/range returns [timestamp, price] pairs.
+ */
+async function fetchCoinGeckoDaily(ticker: string, startISO: string, endISO: string): Promise<Point[]> {
+  const id = toCoinGeckoId(ticker);
+  if (!id) return [];
+
+  const from = isoToUnixSeconds(startISO);
+  // add +1 day so end date is inclusive for range requests
+  const to = isoToUnixSeconds(endISO) + 86400;
+
+  const url =
+    `https://api.coingecko.com/api/v3/coins/${encodeURIComponent(id)}` +
+    `/market_chart/range?vs_currency=usd&from=${from}&to=${to}`;
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error(`CoinGecko fetch failed (${res.status})`);
+
+  const json = (await res.json()) as { prices?: [number, number][] };
+  const prices = Array.isArray(json?.prices) ? json.prices : [];
+
+  // CoinGecko gives many points per day; bucket to last price per day
+  const dayMap: Record<string, Point> = {};
+  for (const [ts, price] of prices) {
+    const d = new Date(ts);
+    const iso = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()))
+      .toISOString()
+      .slice(0, 10);
+    if (!Number.isFinite(price)) continue;
+    dayMap[iso] = { date: iso, close: Number(price) }; // last in day wins
+  }
+
+  const out = Object.values(dayMap).sort((a, b) => a.date.localeCompare(b.date));
+  return filterByRange(out, startISO, endISO);
+}
+
+async function fetchHistory(ticker: string, start: string, end: string): Promise<Point[]> {
+  if (isCryptoTicker(ticker)) return await fetchCoinGeckoDaily(ticker, start, end);
+  // Equities/ETFs default to Stooq
+  const daily = await fetchStooqDaily(ticker);
+  return filterByRange(daily, start, end);
 }
 
 export async function GET(req: Request) {
@@ -95,7 +183,10 @@ export async function GET(req: Request) {
   const end = searchParams.get("end");
   const interval = parseInterval(searchParams.get("interval"));
 
-  const tickers = tickersParam.split(",").map(normalizeTicker).filter(Boolean);
+  const tickers = tickersParam
+    .split(",")
+    .map(normalizeTicker)
+    .filter(Boolean);
 
   if (!tickers.length || !isISODate(start) || !isISODate(end)) {
     return NextResponse.json(
@@ -109,27 +200,26 @@ export async function GET(req: Request) {
   for (const t of tickers) {
     const key = cacheKey(t, start, end, interval);
     const cached = CACHE.get(key);
-
-    // fresh cache
     if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
       out[t] = { points: cached.points, error: cached.error };
       continue;
     }
 
-    const res = await fetchHistoricalWithRetry(t, start, end, interval);
+    try {
+      const pointsDaily = await fetchHistory(t, start, end);
+      const points = downsample(pointsDaily, interval);
 
-    // If rate-limited AND we have stale cache, serve stale cache
-    if (res.rateLimited && cached && Date.now() - cached.ts < CACHE_STALE_OK_MS) {
-      out[t] = { points: cached.points, error: `Using cached data (Yahoo rate limited). ${res.error ?? ""}`.trim() };
-      continue;
+      CACHE.set(key, { ts: Date.now(), points });
+      out[t] = { points };
+    } catch (e: any) {
+      const msg = String(e?.message || e || "Unknown error");
+      CACHE.set(key, { ts: Date.now(), points: [], error: msg });
+      out[t] = { points: [], error: msg };
     }
-
-    CACHE.set(key, { ts: Date.now(), points: res.points, error: res.error });
-    out[t] = { points: res.points, error: res.error };
   }
 
   return NextResponse.json(
     { tickers, interval, start, end, data: out },
-    { headers: { "Cache-Control": "s-maxage=1800, stale-while-revalidate=3600" } }
+    { headers: { "Cache-Control": "s-maxage=21600, stale-while-revalidate=86400" } } // 6h CDN cache
   );
 }

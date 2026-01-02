@@ -8,14 +8,17 @@ type HistoryPoint = {
   close: number;
 };
 
-// ✅ IMPORTANT: this matches your API route shape:
-// data: { [ticker]: { points: HistoryPoint[], error?: string } }
+type HistoryTickerPayload = {
+  points: HistoryPoint[];
+  error?: string;
+};
+
 type HistoryResponse = {
-  tickers: string[];
+  tickers: string[]; // IMPORTANT: these are the ACTUAL keys in data
   interval: Interval;
   start?: string;
   end?: string;
-  data: Record<string, { points: HistoryPoint[]; error?: string }>;
+  data: Record<string, HistoryTickerPayload>;
 };
 
 /**
@@ -86,7 +89,10 @@ async function fetchWithTimeout(
 }
 
 /**
- * Downsample helpers: build daily series, then keep last point per bucket.
+ * Downsample helpers:
+ * We always build a daily series, then:
+ * - weekly: keep last point per week
+ * - monthly: keep last point per month
  */
 function takeWeekEnd<T extends { date: string }>(points: T[]): T[] {
   const map: Record<string, T> = {};
@@ -99,8 +105,7 @@ function takeWeekEnd<T extends { date: string }>(points: T[]): T[] {
     const days = Math.floor((dt.getTime() - firstJan.getTime()) / 86400000);
     const week = Math.floor((days + firstJan.getUTCDay()) / 7);
 
-    const key = `${year}-W${week}`;
-    map[key] = p;
+    map[`${year}-W${week}`] = p;
   }
 
   return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
@@ -111,8 +116,7 @@ function takeMonthEnd<T extends { date: string }>(points: T[]): T[] {
 
   for (const p of points) {
     const dt = new Date(p.date + "T00:00:00Z");
-    const key = `${dt.getUTCFullYear()}-${dt.getUTCMonth()}`;
-    map[key] = p;
+    map[`${dt.getUTCFullYear()}-${dt.getUTCMonth()}`] = p;
   }
 
   return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
@@ -125,16 +129,13 @@ export type PortfolioSeriesPoint = {
 };
 
 /**
- * Yahoo history expects e.g. BTC-USD not BTC/USD.
+ * Normalize user tickers into what we SEND to the server.
+ * Server may further normalize into provider-specific keys (stooq, coingecko).
  */
 function normalizeTickerForHistory(ticker: string): string {
   const t = String(ticker || "").trim().toUpperCase();
 
-  if (t.includes("/")) {
-    const parts = t.split("/");
-    if (parts.length === 2 && parts[1] === "USD") return `${parts[0]}-USD`;
-    return t.replace("/", "-");
-  }
+  if (t.includes("/")) return t.replace("/", "-"); // BTC/USD -> BTC-USD
 
   if (/^[A-Z]{3,6}USD$/.test(t) && !t.includes("-")) {
     const base = t.replace("USD", "");
@@ -149,11 +150,10 @@ function isCashLike(p: Position): boolean {
 }
 
 /**
- * Cash-like "CURRENT" value:
- * MMKT model:
- *   quantity = 1
- *   costBasisPerUnit = initial balance
- *   currentPrice = current balance
+ * Cash-like CURRENT value (for MMKT):
+ * quantity=1
+ * costBasisPerUnit=initial balance
+ * currentPrice=current balance
  */
 function cashLikeCurrentValue(p: Position): number {
   const cp =
@@ -164,15 +164,43 @@ function cashLikeCurrentValue(p: Position): number {
 
   const qty = toNumber(p.quantity);
   const cb = toNumber(p.costBasisPerUnit);
-
-  if (qty === 1) return cb; // old style A
-  return qty; // old style B (qty=balance)
+  if (qty === 1) return cb;
+  return qty;
 }
 
 /**
- * Returns portfolio value time series using historical closes since purchase date.
- * - Market-like: qty * close
- * - Cash/MMKT: constant CURRENT balance
+ * Pick the "best" payload from the response for a requested ticker:
+ * - Prefer exact match
+ * - Else case-insensitive match
+ * - Else if only one key returned, use it
+ */
+function pickPayloadForRequestedTicker(
+  data: HistoryResponse["data"],
+  returnedKeys: string[],
+  requested: string,
+): { key: string; payload: HistoryTickerPayload } | null {
+  if (!data) return null;
+
+  const exact = data[requested];
+  if (exact) return { key: requested, payload: exact };
+
+  const reqUpper = requested.toUpperCase();
+  const ciKey = returnedKeys.find((k) => k.toUpperCase() === reqUpper);
+  if (ciKey && data[ciKey]) return { key: ciKey, payload: data[ciKey] };
+
+  if (returnedKeys.length === 1) {
+    const only = returnedKeys[0];
+    if (data[only]) return { key: only, payload: data[only] };
+  }
+
+  return null;
+}
+
+/**
+ * Returns a portfolio value time series using historical closes since purchase date.
+ * - Market positions: quantity * close on each date
+ * - Cash/MMKT: constant CURRENT balance (no yield modeled)
+ *
  * Never throws.
  */
 export async function fetchPortfolioSeries(opts: {
@@ -184,7 +212,7 @@ export async function fetchPortfolioSeries(opts: {
     const { positions, profile, interval } = opts;
     if (!positions || positions.length === 0) return [];
 
-    // Global start date: earliest purchaseDate or profile start or 1y ago
+    // Global start date = earliest purchaseDate OR profile start OR 1y ago
     let start: string | undefined = undefined;
     for (const p of positions) start = minDate(start, p.purchaseDate);
     start = minDate(start, profile?.portfolioStartDate);
@@ -196,17 +224,15 @@ export async function fetchPortfolioSeries(opts: {
       d.setFullYear(d.getFullYear() - 1);
       start = d.toISOString().slice(0, 10);
     }
+
     start = clampStartNotFuture(start, end);
 
     const cashLike = positions.filter(isCashLike);
     const marketLike = positions.filter((p) => !isCashLike(p));
 
-    const cashConstant = cashLike.reduce(
-      (acc, p) => acc + cashLikeCurrentValue(p),
-      0,
-    );
+    const cashConstant = cashLike.reduce((acc, p) => acc + cashLikeCurrentValue(p), 0);
 
-    // Map positions by normalized ticker
+    // Map market positions by normalized ticker (what we SEND)
     const positionsByTicker = new Map<string, Position[]>();
     for (const p of marketLike) {
       const raw = (p.ticker || "").trim();
@@ -216,10 +242,11 @@ export async function fetchPortfolioSeries(opts: {
       arr.push(p);
       positionsByTicker.set(t, arr);
     }
-    const tickers = Array.from(new Set(Array.from(positionsByTicker.keys())));
 
-    // Only cash-like => flat series (2 points)
-    if (tickers.length === 0) {
+    const requestedTickers = Array.from(new Set(Array.from(positionsByTicker.keys())));
+
+    // Only cash/MMKT => flat line
+    if (requestedTickers.length === 0) {
       const v = Number(cashConstant.toFixed(2));
       const flat: PortfolioSeriesPoint[] = [
         { date: start, value: v, breakdown: cashConstant ? { Cash: v } : {} },
@@ -230,11 +257,11 @@ export async function fetchPortfolioSeries(opts: {
       return flat;
     }
 
-    // Always fetch DAILY and downsample ourselves
+    // Always request DAILY and downsample ourselves
     const fetchInterval: Interval = "1d";
 
     const qs = new URLSearchParams();
-    qs.set("tickers", tickers.join(","));
+    qs.set("tickers", requestedTickers.join(","));
     qs.set("start", start);
     qs.set("end", end);
     qs.set("interval", fetchInterval);
@@ -244,8 +271,8 @@ export async function fetchPortfolioSeries(opts: {
       timeoutMs: 12000,
     });
 
-    // Fallback flat-ish if history fails
-    const fallbackFlat = () => {
+    // If history fails, return flat-ish series using current prices
+    if (!res.ok) {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
@@ -257,53 +284,77 @@ export async function fetchPortfolioSeries(opts: {
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      const flat: PortfolioSeriesPoint[] = [
-        { date: start, value: v },
-        { date: end, value: v },
-      ];
+      const flat: PortfolioSeriesPoint[] = [{ date: start, value: v }, { date: end, value: v }];
       if (interval === "1wk") return takeWeekEnd(flat);
       if (interval === "1mo") return takeMonthEnd(flat);
       return flat;
-    };
-
-    if (!res.ok) return fallbackFlat();
+    }
 
     const json = (await res.json()) as HistoryResponse;
     const data = json?.data || {};
+    const returnedKeys = Array.isArray(json?.tickers) ? json.tickers : Object.keys(data);
 
-    // Unified date set across all tickers (✅ use .points)
+    // Build a mapping: requested ticker -> actual response key (if different)
+    const resolvedKeyByRequested = new Map<string, string>();
+    for (const req of requestedTickers) {
+      const hit = pickPayloadForRequestedTicker(data, returnedKeys, req);
+      if (hit) resolvedKeyByRequested.set(req, hit.key);
+    }
+
+    // Unified date set across ALL returned series we can resolve
     const allDates = new Set<string>();
-    for (const t of tickers) {
-      const pts = data[t]?.points ?? [];
+    for (const req of requestedTickers) {
+      const key = resolvedKeyByRequested.get(req);
+      if (!key) continue;
+      const pts = data[key]?.points ?? [];
       for (const pt of pts) allDates.add(pt.date);
     }
+
     const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
 
-    if (dates.length === 0) return fallbackFlat();
+    // No dates => fallback flat
+    if (dates.length === 0) {
+      const approx =
+        cashConstant +
+        marketLike.reduce((acc, p) => {
+          const unit =
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+              ? p.currentPrice
+              : toNumber(p.costBasisPerUnit);
+          return acc + toNumber(p.quantity) * toNumber(unit);
+        }, 0);
 
-    // Forward-fill closes per ticker
-    const closeByTickerByDate = new Map<string, Map<string, number>>();
-    for (const t of tickers) {
-      const pts = (data[t]?.points ?? [])
-        .slice()
-        .sort((a, b) => a.date.localeCompare(b.date));
+      const v = Number(approx.toFixed(2));
+      const flat: PortfolioSeriesPoint[] = [{ date: start, value: v }, { date: end, value: v }];
+      if (interval === "1wk") return takeWeekEnd(flat);
+      if (interval === "1mo") return takeMonthEnd(flat);
+      return flat;
+    }
+
+    // Forward-fill close per requested ticker using its resolved response key
+    const closeByRequestedByDate = new Map<string, Map<string, number>>();
+
+    for (const req of requestedTickers) {
+      const key = resolvedKeyByRequested.get(req);
+      const series = (key ? data[key]?.points : undefined) ?? [];
+      const sorted = series.slice().sort((a, b) => a.date.localeCompare(b.date));
 
       const map = new Map<string, number>();
       let lastClose: number | undefined = undefined;
 
       let i = 0;
       for (const d of dates) {
-        while (i < pts.length && pts[i].date <= d) {
-          lastClose = pts[i].close;
+        while (i < sorted.length && sorted[i].date <= d) {
+          lastClose = sorted[i].close;
           i++;
         }
         if (typeof lastClose === "number") map.set(d, lastClose);
       }
 
-      closeByTickerByDate.set(t, map);
+      closeByRequestedByDate.set(req, map);
     }
 
-    // Build output series + breakdown
+    // Sum portfolio by date + breakdown
     const out: PortfolioSeriesPoint[] = [];
 
     for (const d of dates) {
@@ -316,19 +367,17 @@ export async function fetchPortfolioSeries(opts: {
         total += cashConstant;
       }
 
-      for (const t of tickers) {
-        const close = closeByTickerByDate.get(t)?.get(d);
+      for (const req of requestedTickers) {
+        const close = closeByRequestedByDate.get(req)?.get(d);
         if (typeof close !== "number") continue;
 
-        const plist = positionsByTicker.get(t) ?? [];
+        const plist = positionsByTicker.get(req) ?? [];
         let tickerValue = 0;
 
-        for (const p of plist) {
-          tickerValue += toNumber(p.quantity) * close;
-        }
+        for (const p of plist) tickerValue += toNumber(p.quantity) * close;
 
         if (tickerValue !== 0) {
-          breakdown[t] = Number(tickerValue.toFixed(2));
+          breakdown[req] = Number(tickerValue.toFixed(2));
           total += tickerValue;
         }
       }
