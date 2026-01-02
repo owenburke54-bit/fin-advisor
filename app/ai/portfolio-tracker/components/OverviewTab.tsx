@@ -6,8 +6,18 @@ import { Button } from "@/components/ui/Button";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
 import { fmtMoney, fmtNumber } from "@/lib/format";
-import { cashFlowsFromTransactions, twr, xirr, xirrCashFlowsWithTerminalValue } from "@/lib/performance";
-import { annualizedVolatility, betaFromReturnSeries, dailyReturns, maxDrawdown } from "@/lib/risk";
+import {
+  cashFlowsFromTransactions,
+  twr,
+  xirr,
+  xirrCashFlowsWithTerminalValue,
+} from "@/lib/performance";
+import {
+  annualizedVolatility,
+  betaFromReturnSeries,
+  dailyReturns,
+  maxDrawdown,
+} from "@/lib/risk";
 import {
   LineChart,
   Line,
@@ -37,7 +47,10 @@ function fmtSignedPct(n: number, decimals = 2) {
 }
 
 function formatAxisDate(iso: string) {
-  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function formatTooltipDate(iso: string) {
@@ -78,19 +91,22 @@ async function fetchHistoryTicker(opts: {
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(`/api/history?${qs.toString()}`, { cache: "no-store", signal: controller.signal });
+    const res = await fetch(`/api/history?${qs.toString()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
     if (!res.ok) return { points: [], error: `HTTP ${res.status}` };
 
     const json = (await res.json()) as HistoryResponse;
 
-    // Some providers normalize tickers; safest is to use the first returned ticker key if available
     const key = (json?.tickers?.[0] ?? ticker).toUpperCase();
-
     const payload = json?.data?.[key] ?? json?.data?.[ticker] ?? null;
-    const points = (payload?.points ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
-    const error = payload?.error;
 
-    return { points, error };
+    const points = (payload?.points ?? [])
+      .slice()
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return { points, error: payload?.error };
   } catch (e) {
     return { points: [], error: e instanceof Error ? e.message : "Fetch failed" };
   } finally {
@@ -133,9 +149,9 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
 
 /**
  * KPI Card (makeover):
- * - fixed internal structure so all big numbers sit on the same baseline across the row
+ * - fixed internal structure so all big numbers sit on the same baseline across the grid
  * - one compact footer line only (optional)
- * - consistent spacing, height, and typography across all 5 cards
+ * - consistent spacing, height, and typography across cards
  */
 function MetricCard(props: {
   title: string;
@@ -150,20 +166,19 @@ function MetricCard(props: {
 
   return (
     <Card className="h-full">
-      <CardContent className="p-5 flex flex-col h-full">
-        <div className="text-xs font-medium text-gray-500">{title}</div>
+      <CardContent className="p-6 flex flex-col h-full">
+        <div className="text-sm font-medium text-gray-600">{title}</div>
 
-        {/* fixed min-height so the BIG numbers align in a row */}
-        <div className="mt-3 min-h-[44px] flex items-end">
-          <div className={`text-3xl font-semibold tracking-tight leading-none tabular-nums ${toneClass}`}>
+        {/* fixed min-height so BIG numbers align */}
+        <div className="mt-4 min-h-[48px] flex items-end">
+          <div className={`text-4xl font-semibold tracking-tight leading-none tabular-nums ${toneClass}`}>
             {value}
           </div>
         </div>
 
         <div className="flex-1" />
 
-        {/* fixed footer height so cards are identical even when some have no footnote */}
-        <div className="mt-4 pt-3 border-t min-h-[28px] flex items-center justify-between gap-2 text-xs text-gray-600">
+        <div className="mt-5 pt-4 border-t min-h-[34px] flex items-center justify-between gap-3 text-sm text-gray-600">
           {footnote ?? <span className="text-gray-400"> </span>}
         </div>
       </CardContent>
@@ -172,7 +187,12 @@ function MetricCard(props: {
 }
 
 /** "Nice" Y-axis ticks (rounded numbers) */
-function niceTicks(min: number, max: number, count: number, mode: ChartMode): { ticks: number[]; domain: [number, number] } {
+function niceTicks(
+  min: number,
+  max: number,
+  count: number,
+  mode: ChartMode
+): { ticks: number[]; domain: [number, number] } {
   if (!Number.isFinite(min) || !Number.isFinite(max) || count < 2) return { ticks: [0, 1], domain: [0, 1] };
   if (min === max) {
     const pad = mode === "dollar" ? Math.max(10, Math.abs(min) * 0.02) : Math.max(0.5, Math.abs(min) * 0.1);
@@ -237,7 +257,9 @@ export default function OverviewTab() {
   const [showBenchmark, setShowBenchmark] = useState(true);
 
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historySeries, setHistorySeries] = useState<{ date: string; value: number; breakdown?: Record<string, number> }[]>([]);
+  const [historySeries, setHistorySeries] = useState<
+    { date: string; value: number; breakdown?: Record<string, number> }[]
+  >([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [benchLoading, setBenchLoading] = useState(false);
@@ -265,7 +287,11 @@ export default function OverviewTab() {
       setHistoryError(null);
 
       try {
-        const series = await fetchPortfolioSeries({ positions: state.positions, profile: state.profile, interval: "1d" });
+        const series = await fetchPortfolioSeries({
+          positions: state.positions,
+          profile: state.profile,
+          interval: "1d",
+        });
         if (reqId !== reqIdRef.current) return;
         setHistorySeries(series);
       } catch (e) {
@@ -334,7 +360,11 @@ export default function OverviewTab() {
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
-    const totalCost = state.positions.reduce((acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0), 0);
+    const totalCost = state.positions.reduce(
+      (acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0),
+      0
+    );
+
     const unrealized = totalValue - totalCost;
 
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
@@ -367,10 +397,13 @@ export default function OverviewTab() {
       const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
+      const benchPct =
+        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : undefined;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
+          ? chartBaseline * (benchClose / benchFirstClose)
+          : undefined;
 
       return {
         d: p.date,
@@ -437,7 +470,9 @@ export default function OverviewTab() {
         : [
             `Latest: Your portfolio ${periodChange >= 0 ? "gained" : "fell"} ${fmtNumber(Math.abs(periodChange), 2)}% (1 day).`,
             `Diversification score: ${diversificationScore}/100.`,
-            ...(typeof twrValue === "number" ? [`True return (TWR)${timeframeLabel}: ${fmtSignedPct(twrValue * 100, 2)}.`] : []),
+            ...(typeof twrValue === "number"
+              ? [`True return (TWR)${timeframeLabel}: ${fmtSignedPct(twrValue * 100, 2)}.`]
+              : []),
           ];
 
     const killer = (() => {
@@ -490,6 +525,7 @@ export default function OverviewTab() {
     return {
       kpis: {
         totalValue,
+        totalCost,
         unrealized,
         dayChange: periodChange,
         sinceStartDollar,
@@ -544,18 +580,13 @@ export default function OverviewTab() {
   const unrealTone = kpis.unrealized >= 0 ? "pos" : "neg";
   const sinceTone = kpis.sinceStartDollar >= 0 ? "pos" : "neg";
   const twrTone = typeof kpis.twr === "number" ? (kpis.twr >= 0 ? "pos" : "neg") : "default";
-
-  const costBasisApprox = kpis.totalValue - kpis.unrealized;
+  const contribTone = (kpis.netContrib ?? 0) >= 0 ? "pos" : "neg";
 
   return (
     <div className="space-y-4">
-      {/* OPTIONAL part applied: only force 5-up on XL so it feels cleaner on medium screens */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
-        <MetricCard
-          title="Total Value"
-          value={fmtMoney(kpis.totalValue)}
-          footnote={<span className="text-gray-500"> </span>}
-        />
+      {/* Even layout: 6 cards => 2 rows of 3 on desktop (clean + aligned) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <MetricCard title="Total Value" value={fmtMoney(kpis.totalValue)} />
 
         <MetricCard
           title="Unrealized P/L"
@@ -569,7 +600,7 @@ export default function OverviewTab() {
           footnote={
             <>
               <span className="text-gray-500">Cost</span>
-              <span className="font-medium text-gray-700 tabular-nums">{fmtMoney(costBasisApprox)}</span>
+              <span className="font-medium text-gray-700 tabular-nums">{fmtMoney(kpis.totalCost ?? 0)}</span>
             </>
           }
         />
@@ -586,7 +617,11 @@ export default function OverviewTab() {
           footnote={
             <>
               <span className="text-gray-500">Return</span>
-              <span className={`font-medium tabular-nums ${kpis.sinceStartPercent >= 0 ? "text-emerald-700" : "text-red-700"}`}>
+              <span
+                className={`font-medium tabular-nums ${
+                  kpis.sinceStartPercent >= 0 ? "text-emerald-700" : "text-red-700"
+                }`}
+              >
                 {fmtSignedPct(kpis.sinceStartPercent, 2)}
               </span>
             </>
@@ -594,22 +629,22 @@ export default function OverviewTab() {
         />
 
         <MetricCard
-          title={`True Return ${timeframe === "1m" ? "(1M)" : timeframe === "1y" ? "(1Y)" : "(All)"}`}
+          title={`True Return (${tfLabel})`}
           value={typeof kpis.twr === "number" ? fmtSignedPct(kpis.twr * 100, 2) : "—"}
           tone={twrTone}
-          footnote={
-            kpis.hasTx ? (
-              <>
-                <span className="text-gray-500">Net contrib</span>
-                <span className="font-medium text-gray-700 tabular-nums">
-                  {kpis.netContrib >= 0 ? "+" : ""}
-                  {fmtMoney(kpis.netContrib)}
-                </span>
-              </>
-            ) : (
-              <span className="text-gray-500">Add transactions for IRR</span>
-            )
+          footnote={<span className="text-gray-500">TWR (cash-flow adjusted)</span>}
+        />
+
+        <MetricCard
+          title={`Net Contrib (${tfLabel})`}
+          value={
+            <>
+              {(kpis.netContrib ?? 0) >= 0 ? "+" : ""}
+              {fmtMoney(kpis.netContrib ?? 0)}
+            </>
           }
+          tone={contribTone}
+          footnote={<span className="text-gray-500">Deposits − withdrawals</span>}
         />
 
         <MetricCard
@@ -658,7 +693,7 @@ export default function OverviewTab() {
 
                 <div className="rounded-lg border bg-white p-3">
                   <div className="text-xs font-medium text-gray-500">Market growth</div>
-                  <div className={`mt-1 text-lg font-semibold ${growthIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                  <div className={`mt-1 text-lg font-semibold ${growthAbs >= 0 ? "text-emerald-700" : "text-red-700"}`}>
                     {kpis.tfMarketGrowth >= 0 ? "+" : ""}
                     {fmtMoney(kpis.tfMarketGrowth ?? 0)}
                   </div>
