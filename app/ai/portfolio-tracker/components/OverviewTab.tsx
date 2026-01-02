@@ -553,7 +553,7 @@ export default function OverviewTab() {
   return (
     <div className="space-y-4">
       {/* 6-up on desktop so True Performance + Risk Metrics fit cleanly */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <MetricCard title="Total Portfolio Value" value={fmtMoney(kpis.totalValue)} />
 
         <MetricCard
@@ -580,11 +580,7 @@ export default function OverviewTab() {
           subValueClassName={kpis.sinceStartPercent >= 0 ? "text-emerald-600" : "text-red-600"}
         />
 
-        <MetricCard
-          title={kpis.hasTx ? periodLabel : "1-Day Change"}
-          value={fmtSignedPct(kpis.dayChange, 2)}
-          valueClassName={kpis.dayChange >= 0 ? "text-emerald-600" : "text-red-600"}
-        />
+        
 
         <MetricCard
           title={`True Performance${timeframe === "all" ? "" : timeframe === "1m" ? " (1M)" : " (1Y)"}`}
