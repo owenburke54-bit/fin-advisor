@@ -131,29 +131,40 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
   );
 }
 
-/** consistent value block height so cards align */
+/**
+ * KPI Card (makeover):
+ * - fixed internal structure so all big numbers sit on the same baseline across the row
+ * - one compact footer line only (optional)
+ * - consistent spacing, height, and typography across all 5 cards
+ */
 function MetricCard(props: {
   title: string;
   value: React.ReactNode;
-  subValue?: React.ReactNode;
-  valueClassName?: string;
-  subValueClassName?: string;
+  footnote?: React.ReactNode; // single compact line
+  tone?: "default" | "pos" | "neg";
 }) {
-  const { title, value, subValue, valueClassName, subValueClassName } = props;
+  const { title, value, footnote, tone = "default" } = props;
+
+  const toneClass =
+    tone === "pos" ? "text-emerald-600" : tone === "neg" ? "text-red-600" : "text-gray-900";
 
   return (
     <Card className="h-full">
-      <CardContent className="p-5">
-        <p className="text-sm font-medium text-gray-600">{title}</p>
-        <div className="mt-3 min-h-[52px] flex flex-col justify-center">
-          <div className={`text-2xl font-semibold tracking-tight text-gray-900 leading-none ${valueClassName ?? ""}`}>
+      <CardContent className="p-5 flex flex-col h-full">
+        <div className="text-xs font-medium text-gray-500">{title}</div>
+
+        {/* fixed min-height so the BIG numbers align in a row */}
+        <div className="mt-3 min-h-[44px] flex items-end">
+          <div className={`text-3xl font-semibold tracking-tight leading-none tabular-nums ${toneClass}`}>
             {value}
           </div>
-          {subValue ? (
-            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>
-              {subValue}
-            </div>
-          ) : null}
+        </div>
+
+        <div className="flex-1" />
+
+        {/* fixed footer height so cards are identical even when some have no footnote */}
+        <div className="mt-4 pt-3 border-t min-h-[28px] flex items-center justify-between gap-2 text-xs text-gray-600">
+          {footnote ?? <span className="text-gray-400"> </span>}
         </div>
       </CardContent>
     </Card>
@@ -519,46 +530,7 @@ export default function OverviewTab() {
     timeframe,
   ]);
 
-  const twrColor = typeof kpis.twr === "number" ? (kpis.twr >= 0 ? "text-emerald-600" : "text-red-600") : "text-gray-900";
-
-  const truePerfSub = (
-    <div className="space-y-1 leading-tight">
-      <div className="text-gray-600">
-        Net contrib:{" "}
-        <span className="font-semibold text-gray-900">
-          {kpis.netContrib >= 0 ? "+" : ""}
-          {fmtMoney(kpis.netContrib)}
-        </span>
-      </div>
-      <div className="text-gray-600">
-        IRR:{" "}
-        <span className="font-semibold text-gray-900">
-          {typeof kpis.xirr === "number"
-            ? `${fmtSignedPct(kpis.xirr * 100, 2)}/yr`
-            : kpis.hasFlows
-              ? "needs more history"
-              : kpis.hasTx
-                ? "add deposits/withdrawals"
-                : "add transactions"}
-        </span>
-      </div>
-    </div>
-  );
-
-  const riskSub = (
-    <span className="text-gray-600">
-      {typeof kpis.riskMdd === "number" ? `Max DD: ${fmtNumber(kpis.riskMdd * 100, 1)}%` : "Max DD: needs more history"}
-      {showBenchmark ? (
-        typeof kpis.riskBeta === "number" ? (
-          ` • Beta: ${fmtNumber(kpis.riskBeta, 2)}`
-        ) : (
-          ` • Beta: ${kpis.betaSamples >= 2 ? "needs more history" : "enable benchmark"}`
-        )
-      ) : (
-        ""
-      )}
-    </span>
-  );
+  const tfLabel = timeframe === "1m" ? "1M" : timeframe === "1y" ? "1Y" : "All";
 
   const contribAbs = Math.abs(kpis.netContrib ?? 0);
   const growthAbs = Math.abs(kpis.tfMarketGrowth ?? 0);
@@ -569,51 +541,91 @@ export default function OverviewTab() {
   const contribIsPos = (kpis.netContrib ?? 0) >= 0;
   const growthIsPos = (kpis.tfMarketGrowth ?? 0) >= 0;
 
-  const tfLabel = timeframe === "1m" ? "1M" : timeframe === "1y" ? "1Y" : "All";
+  const unrealTone = kpis.unrealized >= 0 ? "pos" : "neg";
+  const sinceTone = kpis.sinceStartDollar >= 0 ? "pos" : "neg";
+  const twrTone = typeof kpis.twr === "number" ? (kpis.twr >= 0 ? "pos" : "neg") : "default";
+
+  const costBasisApprox = kpis.totalValue - kpis.unrealized;
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
-        <MetricCard title="Total Portfolio Value" value={fmtMoney(kpis.totalValue)} />
+      {/* OPTIONAL part applied: only force 5-up on XL so it feels cleaner on medium screens */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
+        <MetricCard
+          title="Total Value"
+          value={fmtMoney(kpis.totalValue)}
+          footnote={<span className="text-gray-500"> </span>}
+        />
 
         <MetricCard
-          title="Unrealized Gain/Loss"
+          title="Unrealized P/L"
           value={
             <>
               {kpis.unrealized >= 0 ? "+" : ""}
               {fmtMoney(kpis.unrealized)}
             </>
           }
-          valueClassName={kpis.unrealized >= 0 ? "text-emerald-600" : "text-red-600"}
+          tone={unrealTone}
+          footnote={
+            <>
+              <span className="text-gray-500">Cost</span>
+              <span className="font-medium text-gray-700 tabular-nums">{fmtMoney(costBasisApprox)}</span>
+            </>
+          }
         />
 
         <MetricCard
-          title="Since Start (Gain/Loss)"
+          title="Since Start"
           value={
             <>
               {kpis.sinceStartDollar >= 0 ? "+" : ""}
               {fmtMoney(kpis.sinceStartDollar)}
             </>
           }
-          valueClassName={kpis.sinceStartDollar >= 0 ? "text-emerald-600" : "text-red-600"}
-          subValue={fmtSignedPct(kpis.sinceStartPercent, 2)}
-          subValueClassName={kpis.sinceStartPercent >= 0 ? "text-emerald-600" : "text-red-600"}
+          tone={sinceTone}
+          footnote={
+            <>
+              <span className="text-gray-500">Return</span>
+              <span className={`font-medium tabular-nums ${kpis.sinceStartPercent >= 0 ? "text-emerald-700" : "text-red-700"}`}>
+                {fmtSignedPct(kpis.sinceStartPercent, 2)}
+              </span>
+            </>
+          }
         />
 
         <MetricCard
-          title={`True Performance${timeframe === "all" ? "" : timeframe === "1m" ? " (1M)" : " (1Y)"}`}
+          title={`True Return ${timeframe === "1m" ? "(1M)" : timeframe === "1y" ? "(1Y)" : "(All)"}`}
           value={typeof kpis.twr === "number" ? fmtSignedPct(kpis.twr * 100, 2) : "—"}
-          valueClassName={twrColor}
-          subValue={truePerfSub}
-          subValueClassName="text-gray-600"
+          tone={twrTone}
+          footnote={
+            kpis.hasTx ? (
+              <>
+                <span className="text-gray-500">Net contrib</span>
+                <span className="font-medium text-gray-700 tabular-nums">
+                  {kpis.netContrib >= 0 ? "+" : ""}
+                  {fmtMoney(kpis.netContrib)}
+                </span>
+              </>
+            ) : (
+              <span className="text-gray-500">Add transactions for IRR</span>
+            )
+          }
         />
 
         <MetricCard
-          title="Risk Metrics"
+          title="Risk"
           value={typeof kpis.riskVol === "number" ? `${fmtNumber(kpis.riskVol * 100, 1)}%` : "—"}
-          subValue={riskSub}
-          valueClassName="text-gray-900"
-          subValueClassName="text-gray-600"
+          tone="default"
+          footnote={
+            <>
+              <span className="text-gray-500 tabular-nums">
+                DD {typeof kpis.riskMdd === "number" ? `${fmtNumber(kpis.riskMdd * 100, 1)}%` : "—"}
+              </span>
+              <span className="font-medium text-gray-700 tabular-nums">
+                β {showBenchmark && typeof kpis.riskBeta === "number" ? fmtNumber(kpis.riskBeta, 2) : "—"}
+              </span>
+            </>
+          }
         />
       </div>
 
