@@ -311,7 +311,7 @@ export async function fetchPortfolioSeries(opts: {
       for (const pt of pts) allDates.add(pt.date);
     }
 
-    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b.date));
+    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
 
     // No dates => fallback flat
     if (dates.length === 0) {
