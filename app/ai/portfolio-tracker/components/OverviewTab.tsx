@@ -91,9 +91,7 @@ async function fetchHistoryTicker(opts: {
     if (!res.ok) return [];
 
     const json = (await res.json()) as HistoryResponse;
-    const series = (json?.data?.[ticker] ?? [])
-      .slice()
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const series = (json?.data?.[ticker] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
     return series;
   } catch {
     return [];
@@ -111,25 +109,13 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
 
   return (
     <div className="flex items-center gap-2">
-      <button
-        type="button"
-        className={`${pillBase} ${value === "all" ? active : inactive}`}
-        onClick={() => onChange("all")}
-      >
+      <button type="button" className={`${pillBase} ${value === "all" ? active : inactive}`} onClick={() => onChange("all")}>
         All
       </button>
-      <button
-        type="button"
-        className={`${pillBase} ${value === "1m" ? active : inactive}`}
-        onClick={() => onChange("1m")}
-      >
+      <button type="button" className={`${pillBase} ${value === "1m" ? active : inactive}`} onClick={() => onChange("1m")}>
         1M
       </button>
-      <button
-        type="button"
-        className={`${pillBase} ${value === "1y" ? active : inactive}`}
-        onClick={() => onChange("1y")}
-      >
+      <button type="button" className={`${pillBase} ${value === "1y" ? active : inactive}`} onClick={() => onChange("1y")}>
         1Y
       </button>
     </div>
@@ -156,9 +142,7 @@ function MetricCard(props: {
             {value}
           </div>
           {subValue ? (
-            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>
-              {subValue}
-            </div>
+            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
           ) : null}
         </div>
       </CardContent>
@@ -177,7 +161,6 @@ function niceTicks(min: number, max: number, count: number, mode: ChartMode): { 
   }
 
   const span = Math.abs(max - min);
-
   const rawStep = span / (count - 1);
   const pow10 = Math.pow(10, Math.floor(Math.log10(rawStep)));
   const scaled = rawStep / pow10;
@@ -199,11 +182,28 @@ function niceTicks(min: number, max: number, count: number, mode: ChartMode): { 
   const niceMax = Math.ceil(max / step) * step;
 
   const ticks: number[] = [];
-  for (let v = niceMin; v <= niceMax + step / 2; v += step) {
-    ticks.push(Number(v.toFixed(10)));
-  }
+  for (let v = niceMin; v <= niceMax + step / 2; v += step) ticks.push(Number(v.toFixed(10)));
 
   return { ticks, domain: [niceMin, niceMax] };
+}
+
+function isExternalCashTx(t: any): boolean {
+  return t?.type === "CASH_DEPOSIT" || t?.type === "CASH_WITHDRAWAL";
+}
+
+function sumNetContributions(transactions: any[], cutoffISO?: string, terminalISO?: string): number {
+  const txs = Array.isArray(transactions) ? transactions : [];
+  return txs
+    .filter(isExternalCashTx)
+    .filter((t) => typeof t?.date === "string")
+    .filter((t) => (!cutoffISO ? true : t.date >= cutoffISO))
+    .filter((t) => (!terminalISO ? true : t.date <= terminalISO))
+    .reduce((acc, t) => {
+      const amt = Number(t?.amount ?? 0);
+      if (!Number.isFinite(amt)) return acc;
+      // deposit = +amount, withdrawal = -amount
+      return acc + (t.type === "CASH_WITHDRAWAL" ? -Math.abs(amt) : Math.abs(amt));
+    }, 0);
 }
 
 export default function OverviewTab() {
@@ -312,15 +312,11 @@ export default function OverviewTab() {
 
   const { kpis, chartData, yAxis, updates, killer, periodLabel } = useMemo(() => {
     const totalValue = state.positions.reduce((acc, p) => {
-      const unit =
-        typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+      const unit = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
-    const totalCost = state.positions.reduce(
-      (acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0),
-      0,
-    );
+    const totalCost = state.positions.reduce((acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0), 0);
     const unrealized = totalValue - totalCost;
 
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
@@ -334,6 +330,7 @@ export default function OverviewTab() {
         : 0;
 
     const periodLabel = "1-Day Change";
+
     const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
 
     const benchArr = benchSeries.slice().sort((a, b) => a.date.localeCompare(b.date));
@@ -352,13 +349,10 @@ export default function OverviewTab() {
       const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct =
-        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
+      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
-          ? chartBaseline * (benchClose / benchFirstClose)
-          : undefined;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : undefined;
 
       return {
         d: p.date,
@@ -395,15 +389,25 @@ export default function OverviewTab() {
 
     const { ticks, domain } = niceTicks(yMin - pad, yMax + pad, 5, mode);
 
-    // --- True performance (TWR + IRR) ---
-    const flows = cashFlowsFromTransactions(state.transactions ?? []);
-    const perfSeries = historySeries.map((p) => ({ date: p.date, value: p.value }));
+    // ---- True performance (timeframe-aware) ----
+    const flowsAll = cashFlowsFromTransactions(state.transactions ?? []);
+    const perfSeries = filteredHistorySeries.map((p) => ({ date: p.date, value: p.value }));
+
     const terminalValue = perfSeries.length ? perfSeries.at(-1)!.value : totalValue;
     const terminalDate = perfSeries.length ? perfSeries.at(-1)!.date : todayISO();
 
-    const twrValue = perfSeries.length >= 2 ? twr(perfSeries, flows) : null; // cumulative (fraction)
-    const irrFlows = xirrCashFlowsWithTerminalValue(flows, terminalDate, terminalValue);
-    const xirrValue = xirr(irrFlows); // annualized (fraction)
+    const flowsTf = flowsAll
+      .filter((f: any) => typeof f?.date === "string" && typeof f?.amount === "number")
+      .filter((f: any) => (!cutoffISO ? true : f.date >= cutoffISO))
+      .filter((f: any) => f.date <= terminalDate);
+
+    const twrValue = perfSeries.length >= 2 ? twr(perfSeries, flowsTf) : null; // cumulative fraction
+    const irrFlows = xirrCashFlowsWithTerminalValue(flowsTf, terminalDate, terminalValue);
+    const xirrValue = xirr(irrFlows); // annualized fraction (may be null/NaN depending on implementation)
+
+    const netContrib = sumNetContributions(state.transactions ?? [], cutoffISO, terminalDate);
+
+    const timeframeLabel = timeframe === "1m" ? " (1M)" : timeframe === "1y" ? " (1Y)" : " (All)";
 
     const updates =
       historySeries.length < 2
@@ -411,7 +415,7 @@ export default function OverviewTab() {
         : [
             `Latest: Your portfolio ${periodChange >= 0 ? "gained" : "fell"} ${fmtNumber(Math.abs(periodChange), 2)}% (1 day).`,
             `Diversification score: ${diversificationScore}/100.`,
-            ...(typeof twrValue === "number" ? [`True return (TWR): ${fmtSignedPct(twrValue * 100, 2)} since start.`] : []),
+            ...(typeof twrValue === "number" ? [`True return (TWR)${timeframeLabel}: ${fmtSignedPct(twrValue * 100, 2)}.`] : []),
           ];
 
     const killer = (() => {
@@ -419,8 +423,7 @@ export default function OverviewTab() {
 
       const rows = state.positions
         .map((p) => {
-          const current =
-            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+          const current = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
           const cost = Number(p.costBasisPerUnit) || 0;
           const qty = Number(p.quantity) || 0;
           const pnl = (current - cost) * qty;
@@ -436,6 +439,9 @@ export default function OverviewTab() {
       return { ticker: top.ticker, pnl: top.pnl, dir: top.pnl >= 0 ? "gains" : "losses" };
     })();
 
+    const hasAnyTx = Array.isArray(state.transactions) && state.transactions.length > 0;
+    const hasAnyFlow = flowsAll.some((f: any) => Number(f?.amount) !== 0);
+
     return {
       kpis: {
         totalValue,
@@ -444,8 +450,10 @@ export default function OverviewTab() {
         sinceStartDollar,
         sinceStartPercent,
         twr: twrValue, // fraction
-        xirr: xirrValue, // fraction
-        hasFlows: flows.some((f) => f.amount !== 0),
+        xirr: typeof xirrValue === "number" && Number.isFinite(xirrValue) ? xirrValue : null, // fraction
+        netContrib,
+        hasTx: hasAnyTx,
+        hasFlows: hasAnyFlow,
       },
       chartData: aligned,
       yAxis: { ticks, domain },
@@ -459,14 +467,38 @@ export default function OverviewTab() {
     diversificationScore,
     historySeries,
     filteredHistorySeries,
+    cutoffISO,
     mode,
     benchSeries,
     showBenchmark,
     timeframe,
   ]);
 
-  const twrColor =
-    typeof kpis.twr === "number" ? (kpis.twr >= 0 ? "text-emerald-600" : "text-red-600") : "text-gray-900";
+  const twrColor = typeof kpis.twr === "number" ? (kpis.twr >= 0 ? "text-emerald-600" : "text-red-600") : "text-gray-900";
+
+  const truePerfSub = (
+    <div className="space-y-1 leading-tight">
+      <div className="text-gray-600">
+        Net contrib:{" "}
+        <span className="font-semibold text-gray-900">
+          {kpis.netContrib >= 0 ? "+" : ""}
+          {fmtMoney(kpis.netContrib)}
+        </span>
+      </div>
+      <div className="text-gray-600">
+        IRR:{" "}
+        <span className="font-semibold text-gray-900">
+          {typeof kpis.xirr === "number"
+            ? `${fmtSignedPct(kpis.xirr * 100, 2)}/yr`
+            : kpis.hasFlows
+              ? "needs more history"
+              : kpis.hasTx
+                ? "add deposits/withdrawals"
+                : "add transactions"}
+        </span>
+      </div>
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -499,22 +531,16 @@ export default function OverviewTab() {
         />
 
         <MetricCard
-          title={periodLabel}
+          title={kpis.hasTx ? periodLabel : "1-Day Change"}
           value={fmtSignedPct(kpis.dayChange, 2)}
           valueClassName={kpis.dayChange >= 0 ? "text-emerald-600" : "text-red-600"}
         />
 
         <MetricCard
-          title="True Return (TWR)"
+          title={`True Performance${timeframe === "all" ? "" : timeframe === "1m" ? " (1M)" : " (1Y)"}`}
           value={typeof kpis.twr === "number" ? fmtSignedPct(kpis.twr * 100, 2) : "—"}
           valueClassName={twrColor}
-          subValue={
-            typeof kpis.xirr === "number"
-              ? `IRR: ${fmtSignedPct(kpis.xirr * 100, 2)}/yr`
-              : kpis.hasFlows
-                ? "IRR: add more history"
-                : "IRR: add deposits/withdrawals"
-          }
+          subValue={truePerfSub}
           subValueClassName="text-gray-600"
         />
       </div>
