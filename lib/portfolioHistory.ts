@@ -25,30 +25,32 @@ function isISODate(s?: string): s is string {
  * - M/D/YYYY or MM/DD/YYYY (converts to YYYY-MM-DD)
  * Otherwise returns undefined.
  */
-function coerceToISODate(raw?: string): string | undefined {
-  if (!raw) return undefined;
-  const s = String(raw).trim();
-  if (isISODate(s)) return s;
+function coerceToISODate(raw?: unknown): string | undefined {
+  if (raw == null) return undefined;
 
-  // M/D/YYYY or MM/DD/YYYY
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) {
-    const mm = String(m[1]).padStart(2, "0");
-    const dd = String(m[2]).padStart(2, "0");
-    const yyyy = m[3];
-    return `${yyyy}-${mm}-${dd}`;
-  }
+  const s: string = typeof raw === "string" ? raw.trim() : String(raw).trim();
+  if (!s) return undefined;
 
-  return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (!m) return undefined;
+
+  const mm = m[1].padStart(2, "0");
+  const dd = m[2].padStart(2, "0");
+  const yyyy = m[3];
+  return `${yyyy}-${mm}-${dd}`;
 }
 
-function minDate(a?: string, b?: string): string | undefined {
+
+function minDate(a?: unknown, b?: unknown): string | undefined {
   const A = coerceToISODate(a);
   const B = coerceToISODate(b);
   if (!A) return B ?? undefined;
   if (!B) return A;
   return A <= B ? A : B;
 }
+
 
 function toNumber(x: unknown, fallback = 0): number {
   const n = Number(x);
