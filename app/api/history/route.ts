@@ -1,158 +1,129 @@
+// app/api/history/route.ts
 import { NextResponse } from "next/server";
-import YahooFinance from "yahoo-finance2";
+import yahooFinance from "yahoo-finance2";
 
-export const runtime = "nodejs"; // yahoo-finance2 needs Node runtime
-export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
-// v3+ usage: create an instance
-const yahooFinance = new YahooFinance();
+// Cache in-memory (works well on a warm lambda; also reduces repeat calls in local dev)
+type Cached = { ts: number; points: { date: string; close: number }[]; error?: string };
+const CACHE = new Map<string, Cached>();
+const CACHE_TTL_MS = 1000 * 60 * 30; // 30 min
 
-function parseDateParam(s: string | null): Date | undefined {
-  if (!s) return undefined;
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return undefined;
-  return d;
+type Interval = "1d" | "1wk" | "1mo";
+
+function isISODate(s?: string | null): s is string {
+  return !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
 }
 
-function clampStart(start?: Date): Date | undefined {
-  if (!start) return undefined;
-  const tenYearsAgo = new Date();
-  tenYearsAgo.setFullYear(tenYearsAgo.getFullYear() - 10);
-  return start < tenYearsAgo ? tenYearsAgo : start;
+function parseInterval(v: string | null): Interval {
+  if (v === "1wk" || v === "1mo" || v === "1d") return v;
+  return "1d";
 }
 
-function normalizeTickerForYahoo(raw: string) {
-  // Keep it simple + predictable:
-  // - uppercase + trim
-  // - convert crypto "BTC/USD" -> "BTC-USD"
-  // - convert class shares "BRK.B" -> "BRK-B"
-  const s = raw.trim().toUpperCase();
-  return s.replaceAll("/", "-").replaceAll(".", "-");
+function normalizeTicker(t: string) {
+  // Handle crypto style tickers
+  const up = t.trim().toUpperCase();
+  if (up.includes("/")) return up.replace("/", "-"); // BTC/USD -> BTC-USD
+  return up;
+}
+
+function cacheKey(ticker: string, start: string, end: string, interval: Interval) {
+  return `${ticker}|${start}|${end}|${interval}`;
+}
+
+async function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchHistoricalWithRetry(ticker: string, start: string, end: string, interval: Interval) {
+  // yahoo-finance2 expects Date for period1/period2
+  const period1 = new Date(start + "T00:00:00Z");
+  const period2 = new Date(end + "T00:00:00Z");
+
+  const opts: any = {
+    period1,
+    period2,
+    interval,
+  };
+
+  // Simple retry on 429 / rate-limit-ish errors
+  const tries = [0, 600, 1500]; // immediate, then backoff
+  let lastErr: any = null;
+
+  for (const wait of tries) {
+    if (wait) await sleep(wait);
+    try {
+      const raw = (await yahooFinance.historical(ticker, opts)) as any;
+
+      const rows: any[] = Array.isArray(raw) ? raw : [];
+      const points = rows
+        .filter((r) => r?.date && typeof r?.close === "number")
+        .map((r) => ({
+          date: new Date(r.date).toISOString().slice(0, 10),
+          close: Number(r.close),
+        }))
+        .sort((a, b) => a.date.localeCompare(b.date));
+
+      return { points };
+    } catch (e: any) {
+      lastErr = e;
+      const msg = String(e?.message || e || "");
+      const code = e?.code || e?.name;
+
+      // retry only on rate limits / transient
+      const looksRateLimited =
+        msg.toLowerCase().includes("too many requests") ||
+        msg.toLowerCase().includes("rate limit") ||
+        msg.includes("429") ||
+        code === 429;
+
+      if (!looksRateLimited) break;
+    }
+  }
+
+  const message = String(lastErr?.message || lastErr || "Unknown error");
+  return { points: [], error: message };
 }
 
 export async function GET(req: Request) {
-  try {
-    const { searchParams } = new URL(req.url);
+  const { searchParams } = new URL(req.url);
 
-    const tickersParam = searchParams.get("tickers") || searchParams.get("ticker") || "";
-    const tickers = tickersParam
-      .split(",")
-      .map((t) => t.trim().toUpperCase())
-      .filter(Boolean);
+  const tickersParam = searchParams.get("tickers") || "";
+  const start = searchParams.get("start");
+  const end = searchParams.get("end");
+  const interval = parseInterval(searchParams.get("interval"));
 
-    if (tickers.length === 0) {
-      return NextResponse.json(
-        { error: "Missing query param: tickers (e.g. ?tickers=AAPL,VOO)" },
-        { status: 400 },
-      );
-    }
+  const tickers = tickersParam
+    .split(",")
+    .map(normalizeTicker)
+    .filter(Boolean);
 
-    const interval = (searchParams.get("interval") || "1d") as "1d" | "1wk" | "1mo";
-
-    const startRaw = parseDateParam(searchParams.get("start"));
-    const endRaw = parseDateParam(searchParams.get("end"));
-
-    const start = clampStart(startRaw);
-    const end = endRaw;
-
-    // IMPORTANT: yahooFinance.historical requires period1 (cannot be undefined).
-    // Fallback: 1 year ago if no start provided.
-    const fallbackStart = new Date();
-    fallbackStart.setFullYear(fallbackStart.getFullYear() - 1);
-    const period1 = start ?? fallbackStart;
-
-    // If user is requesting weekly-like behavior, we’ll filter to Fridays only client-side.
-    // We still fetch 1d data from Yahoo for accuracy and then downsample.
-    const effectiveInterval = interval === "1wk" ? "1d" : interval;
-
-    const results = await Promise.all(
-      tickers.map(async (originalTicker) => {
-        const yfTicker = normalizeTickerForYahoo(originalTicker);
-
-        try {
-          // Use `any` to avoid Next/TS overload friction with yahoo-finance2 types.
-          const opts: any = {
-            period1,
-            interval: effectiveInterval,
-          };
-          if (end) opts.period2 = end;
-
-          const raw = (await yahooFinance.historical(yfTicker, opts)) as unknown;
-          const rows: any[] = Array.isArray(raw) ? raw : [];
-
-          const cleaned = rows
-            .filter((r) => r?.date && typeof r?.close === "number" && Number.isFinite(r.close))
-            .map((r) => ({
-              date: new Date(r.date as any).toISOString().slice(0, 10), // YYYY-MM-DD
-              close: Number(r.close),
-            }))
-            .sort((a, b) => a.date.localeCompare(b.date));
-
-          // Weekly sampling: keep only Fridays (your “Friday close” model)
-          let points = cleaned;
-          if (interval === "1wk") {
-            points = cleaned.filter((p) => {
-              const d = new Date(p.date + "T12:00:00Z"); // stable day-of-week
-              return d.getUTCDay() === 5; // Friday
-            });
-
-            // If we ended up with 0 points (rare), at least include the last available point
-            if (points.length === 0 && cleaned.length > 0) {
-              const last = cleaned[cleaned.length - 1];
-              points = [last];
-            }
-          }
-
-          // Monthly sampling: last Friday of each month
-          if (interval === "1mo") {
-            const byMonth = new Map<string, { date: string; close: number }[]>();
-            for (const p of cleaned) {
-              const ym = p.date.slice(0, 7); // YYYY-MM
-              const arr = byMonth.get(ym) ?? [];
-              arr.push(p);
-              byMonth.set(ym, arr);
-            }
-
-            const monthly: { date: string; close: number }[] = [];
-            for (const [, arr] of byMonth.entries()) {
-              // pick last Friday in that month if present, else last trading day
-              const fridays = arr.filter((p) => new Date(p.date + "T12:00:00Z").getUTCDay() === 5);
-              const bucket = fridays.length ? fridays : arr;
-              const pick = bucket[bucket.length - 1];
-              if (pick) monthly.push(pick);
-            }
-
-            points = monthly.sort((a, b) => a.date.localeCompare(b.date));
-          }
-
-          // Key response by the ORIGINAL ticker so your UI continues to match
-          return [originalTicker, points] as const;
-        } catch (e: any) {
-          // Don’t kill the entire request; return empty series + error marker
-          return [
-            originalTicker,
-            {
-              error: `Failed for ${originalTicker} (Yahoo: ${yfTicker}): ${e?.message ?? String(e)}`,
-              points: [],
-            },
-          ] as const;
-        }
-      }),
-    );
-
-    const data = Object.fromEntries(results);
-
-    return NextResponse.json({
-      tickers,
-      interval,
-      start: period1.toISOString().slice(0, 10),
-      end: end ? end.toISOString().slice(0, 10) : undefined,
-      data,
-    });
-  } catch (err: any) {
+  if (!tickers.length || !isISODate(start) || !isISODate(end)) {
     return NextResponse.json(
-      { error: "Failed to fetch historical data", detail: err?.message ?? String(err) },
-      { status: 500 },
+      { error: "Missing/invalid params. Need tickers,start,end (YYYY-MM-DD),interval." },
+      { status: 400 }
     );
   }
+
+  const out: Record<string, { points: { date: string; close: number }[]; error?: string }> = {};
+
+  for (const t of tickers) {
+    const key = cacheKey(t, start, end, interval);
+    const cached = CACHE.get(key);
+    if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
+      out[t] = { points: cached.points, error: cached.error };
+      continue;
+    }
+
+    const res = await fetchHistoricalWithRetry(t, start, end, interval);
+
+    CACHE.set(key, { ts: Date.now(), points: res.points, error: res.error });
+    out[t] = { points: res.points, error: res.error };
+  }
+
+  // Cache hint for browsers/CDN (still fine even if lambda cold-starts)
+  return NextResponse.json(
+    { tickers, interval, start, end, data: out },
+    { headers: { "Cache-Control": "s-maxage=1800, stale-while-revalidate=3600" } }
+  );
 }

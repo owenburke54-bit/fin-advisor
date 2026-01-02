@@ -13,7 +13,8 @@ type HistoryResponse = {
   interval: Interval;
   start?: string;
   end?: string;
-  data: Record<string, HistoryPoint[]>;
+  // UPDATED SHAPE: route returns { points, error? } per ticker
+  data: Record<string, { points: HistoryPoint[]; error?: string }>;
 };
 
 /**
@@ -228,7 +229,10 @@ export async function fetchPortfolioSeries(opts: {
     const marketLike = positions.filter((p) => !isCashLike(p));
 
     // Cash-like constant (CURRENT balance)
-    const cashConstant = cashLike.reduce((acc, p) => acc + cashLikeCurrentValue(p), 0);
+    const cashConstant = cashLike.reduce(
+      (acc, p) => acc + cashLikeCurrentValue(p),
+      0,
+    );
 
     // Map market positions by normalized ticker
     const positionsByTicker = new Map<string, Position[]>();
@@ -297,7 +301,7 @@ export async function fetchPortfolioSeries(opts: {
     // Unified date set across all tickers
     const allDates = new Set<string>();
     for (const t of tickers) {
-      for (const pt of data[t] ?? []) allDates.add(pt.date);
+      for (const pt of data[t]?.points ?? []) allDates.add(pt.date);
     }
     const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
 
@@ -326,7 +330,9 @@ export async function fetchPortfolioSeries(opts: {
     // Forward-fill closes per ticker so portfolio value exists on all dates
     const closeByTickerByDate = new Map<string, Map<string, number>>();
     for (const t of tickers) {
-      const series = (data[t] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
+      const series = (data[t]?.points ?? [])
+        .slice()
+        .sort((a, b) => a.date.localeCompare(b.date));
 
       const map = new Map<string, number>();
       let lastClose: number | undefined = undefined;
