@@ -1,3 +1,4 @@
+// lib/portfolioHistory.ts
 import type { Position, UserProfile } from "./types";
 
 type Interval = "1d" | "1wk" | "1mo";
@@ -14,10 +15,6 @@ type HistoryResponse = {
   end?: string;
   data: Record<string, HistoryPoint[]>;
 };
-
-function isISODate(s?: string): s is string {
-  return !!s && /^\d{4}-\d{2}-\d{2}$/.test(s);
-}
 
 /**
  * Accepts:
@@ -36,12 +33,11 @@ function coerceToISODate(raw?: unknown): string | undefined {
   const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
   if (!m) return undefined;
 
-  const mm = m[1].padStart(2, "0");
-  const dd = m[2].padStart(2, "0");
-  const yyyy = m[3];
+  const mm = String(m[1]).padStart(2, "0");
+  const dd = String(m[2]).padStart(2, "0");
+  const yyyy = String(m[3]);
   return `${yyyy}-${mm}-${dd}`;
 }
-
 
 function minDate(a?: unknown, b?: unknown): string | undefined {
   const A = coerceToISODate(a);
@@ -50,7 +46,6 @@ function minDate(a?: unknown, b?: unknown): string | undefined {
   if (!B) return A;
   return A <= B ? A : B;
 }
-
 
 function toNumber(x: unknown, fallback = 0): number {
   const n = Number(x);
@@ -68,6 +63,7 @@ function addDaysISO(iso: string, days: number): string {
 }
 
 function clampStartNotFuture(startISO: string, endISO: string): string {
+  // If user accidentally sets start date after today, clamp to 30 days back so we still chart.
   if (startISO > endISO) return addDaysISO(endISO, -30);
   return startISO;
 }
@@ -93,6 +89,8 @@ async function fetchWithTimeout(
  * We always build a daily (trading-day) series, then:
  * - weekly: keep the last point per week
  * - monthly: keep the last point per month
+ *
+ * This avoids missing months due to API interval bucketing quirks.
  */
 function takeWeekEnd<T extends { date: string }>(points: T[]): T[] {
   const map: Record<string, T> = {};
@@ -106,7 +104,7 @@ function takeWeekEnd<T extends { date: string }>(points: T[]): T[] {
     const week = Math.floor((days + firstJan.getUTCDay()) / 7);
 
     const key = `${year}-W${week}`;
-    map[key] = p;
+    map[key] = p; // overwrite keeps last point in week
   }
 
   return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
@@ -117,8 +115,8 @@ function takeMonthEnd<T extends { date: string }>(points: T[]): T[] {
 
   for (const p of points) {
     const dt = new Date(p.date + "T00:00:00Z");
-    const key = `${dt.getUTCFullYear()}-${dt.getUTCMonth()}`;
-    map[key] = p;
+    const key = `${dt.getUTCFullYear()}-${dt.getUTCMonth()}`; // 0-based month bucket
+    map[key] = p; // overwrite keeps last point in month
   }
 
   return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
@@ -127,12 +125,16 @@ function takeMonthEnd<T extends { date: string }>(points: T[]): T[] {
 export type PortfolioSeriesPoint = {
   date: string;
   value: number;
+  /**
+   * Optional per-ticker breakdown for tooltips, allocation views, etc.
+   * Keys are tickers (e.g., "VOO", "NVDA") plus "Cash" if applicable.
+   */
   breakdown?: Record<string, number>;
 };
 
 /**
  * Yahoo history expects e.g. BTC-USD not BTC/USD.
- * Also handles common USD pairs.
+ * Also handles common USD pairs and BTCUSD style.
  */
 function normalizeTickerForHistory(ticker: string): string {
   const t = String(ticker || "").trim().toUpperCase();
@@ -141,11 +143,10 @@ function normalizeTickerForHistory(ticker: string): string {
   if (t.includes("/")) {
     const parts = t.split("/");
     if (parts.length === 2 && parts[1] === "USD") return `${parts[0]}-USD`;
-    // generic fallback
     return t.replace("/", "-");
   }
 
-  // Convert "BTCUSD" -> "BTC-USD" if user stores that way
+  // Convert "BTCUSD" -> "BTC-USD"
   if (/^[A-Z]{3,6}USD$/.test(t) && !t.includes("-")) {
     const base = t.replace("USD", "");
     return `${base}-USD`;
@@ -159,31 +160,38 @@ function isCashLike(p: Position): boolean {
 }
 
 /**
- * Cash-like constant value:
- * With your new MMKT model:
+ * Cash-like "CURRENT" value:
+ * With your MMKT model:
  *   quantity = 1
  *   costBasisPerUnit = initial balance
  *   currentPrice = current balance
  *
- * For charting "portfolio value", you want CURRENT balance (currentPrice) if present.
+ * For portfolio value charting, we want CURRENT balance if present.
  */
 function cashLikeCurrentValue(p: Position): number {
-  const cp = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : undefined;
+  const cp =
+    typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+      ? p.currentPrice
+      : undefined;
   if (typeof cp === "number") return cp;
 
   // fallback to older storage styles
   const qty = toNumber(p.quantity);
   const cb = toNumber(p.costBasisPerUnit);
+
+  // Style A: qty=1, cb=balance
   if (qty === 1) return cb;
-  return qty; // if stored as qty=balance
+
+  // Style B: qty=balance
+  return qty;
 }
 
 /**
  * Returns a portfolio value time series using historical closes since purchase date.
- * - For each position, uses quantity * close on each date
- * - CASH / Money Market is treated as constant current balance (no yield modeled)
+ * - For each market position, uses quantity * close on each date
+ * - Cash/Money Market treated as constant CURRENT balance (no yield modeled yet)
  *
- * IMPORTANT: Never throws.
+ * IMPORTANT: This function is designed to NEVER throw.
  */
 export async function fetchPortfolioSeries(opts: {
   positions: Position[];
@@ -192,6 +200,7 @@ export async function fetchPortfolioSeries(opts: {
 }): Promise<PortfolioSeriesPoint[]> {
   try {
     const { positions, profile, interval } = opts;
+
     if (!positions || positions.length === 0) return [];
 
     // Determine global start date:
@@ -221,7 +230,7 @@ export async function fetchPortfolioSeries(opts: {
     // Cash-like constant (CURRENT balance)
     const cashConstant = cashLike.reduce((acc, p) => acc + cashLikeCurrentValue(p), 0);
 
-    // Map positions by normalized ticker
+    // Map market positions by normalized ticker
     const positionsByTicker = new Map<string, Position[]>();
     for (const p of marketLike) {
       const tRaw = (p.ticker || "").trim();
@@ -234,7 +243,7 @@ export async function fetchPortfolioSeries(opts: {
 
     const tickers = Array.from(new Set(Array.from(positionsByTicker.keys())));
 
-    // Only cash-like -> flat series
+    // If you only have cash-like positions, return flat line with 2 points
     if (tickers.length === 0) {
       const v = Number(cashConstant.toFixed(2));
       const flat: PortfolioSeriesPoint[] = [
@@ -246,7 +255,7 @@ export async function fetchPortfolioSeries(opts: {
       return flat;
     }
 
-    // Always fetch DAILY, downsample ourselves.
+    // Always fetch DAILY closes then downsample ourselves
     const fetchInterval: Interval = "1d";
 
     const qs = new URLSearchParams();
@@ -260,17 +269,23 @@ export async function fetchPortfolioSeries(opts: {
       timeoutMs: 12000,
     });
 
-    // Fallback flat-ish series if history fails
+    // fallback flat-ish series if history fails
     if (!res.ok) {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
-          const unit = typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit;
+          const unit =
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+              ? p.currentPrice
+              : toNumber(p.costBasisPerUnit);
           return acc + toNumber(p.quantity) * toNumber(unit);
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      const flat: PortfolioSeriesPoint[] = [{ date: start, value: v }, { date: end, value: v }];
+      const flat: PortfolioSeriesPoint[] = [
+        { date: start, value: v },
+        { date: end, value: v },
+      ];
       if (interval === "1wk") return takeWeekEnd(flat);
       if (interval === "1mo") return takeMonthEnd(flat);
       return flat;
@@ -279,30 +294,36 @@ export async function fetchPortfolioSeries(opts: {
     const json = (await res.json()) as HistoryResponse;
     const data = json?.data || {};
 
-    // Unified date set
+    // Unified date set across all tickers
     const allDates = new Set<string>();
     for (const t of tickers) {
       for (const pt of data[t] ?? []) allDates.add(pt.date);
     }
-    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b.date));
+    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
 
-    // If no dates came back, fallback flat series
+    // If API returned no dates at all, return approx flat series
     if (dates.length === 0) {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
-          const unit = typeof p.currentPrice === "number" ? p.currentPrice : p.costBasisPerUnit;
+          const unit =
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+              ? p.currentPrice
+              : toNumber(p.costBasisPerUnit);
           return acc + toNumber(p.quantity) * toNumber(unit);
         }, 0);
 
       const v = Number(approx.toFixed(2));
-      const flat: PortfolioSeriesPoint[] = [{ date: start, value: v }, { date: end, value: v }];
+      const flat: PortfolioSeriesPoint[] = [
+        { date: start, value: v },
+        { date: end, value: v },
+      ];
       if (interval === "1wk") return takeWeekEnd(flat);
       if (interval === "1mo") return takeMonthEnd(flat);
       return flat;
     }
 
-    // Forward-fill close per ticker
+    // Forward-fill closes per ticker so portfolio value exists on all dates
     const closeByTickerByDate = new Map<string, Map<string, number>>();
     for (const t of tickers) {
       const series = (data[t] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
@@ -322,7 +343,7 @@ export async function fetchPortfolioSeries(opts: {
       closeByTickerByDate.set(t, map);
     }
 
-    // Build portfolio series + breakdown
+    // Sum portfolio value by date + breakdown by ticker
     const out: PortfolioSeriesPoint[] = [];
 
     for (const d of dates) {
@@ -343,25 +364,32 @@ export async function fetchPortfolioSeries(opts: {
         let tickerValue = 0;
 
         for (const p of plist) {
-          const qty = toNumber(p.quantity);
-          tickerValue += qty * close;
+          tickerValue += toNumber(p.quantity) * close;
         }
 
         if (tickerValue !== 0) {
-          breakdown[t] = Number(tickerValue.toFixed(2));
+          const rounded = Number(tickerValue.toFixed(2));
+          breakdown[t] = rounded;
           total += tickerValue;
         }
       }
 
-      out.push({ date: d, value: Number(total.toFixed(2)), breakdown });
+      out.push({
+        date: d,
+        value: Number(total.toFixed(2)),
+        breakdown,
+      });
     }
 
+    // Ensure at least 2 points for charts
     if (out.length === 1) out.push({ ...out[0], date: end });
 
+    // Downsample to requested interval (preserves breakdown)
     if (interval === "1wk") return takeWeekEnd(out);
     if (interval === "1mo") return takeMonthEnd(out);
     return out;
   } catch {
+    // Never let the UI hang
     return [];
   }
 }
