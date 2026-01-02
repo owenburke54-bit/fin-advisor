@@ -67,10 +67,22 @@ export interface PortfolioSnapshot {
  * Notes:
  * - ticker is required for BUY/SELL.
  * - quantity is required for BUY/SELL.
- * - price is optional; if omitted, we can fall back to Yahoo close on that date.
- * - accountType is optional; if omitted, treat as "Taxable" by default.
+ * - price is optional; if omitted, we can fall back to historical close.
+ * - accountType is optional; default to "Taxable".
  */
-export type TxType = "BUY" | "SELL" | "CASH_DEPOSIT" | "CASH_WITHDRAWAL";
+export type TxType =
+  | "BUY"
+  | "SELL"
+  | "CASH_DEPOSIT"
+  | "CASH_WITHDRAWAL";
+
+/** ✅ Friendly labels for UI */
+export const TxTypeLabel: Record<TxType, string> = {
+  BUY: "Buy",
+  SELL: "Sell",
+  CASH_DEPOSIT: "Cash deposit",
+  CASH_WITHDRAWAL: "Cash withdrawal",
+};
 
 export interface Transaction {
   id: string; // uuid
@@ -80,7 +92,7 @@ export interface Transaction {
   // Trades
   ticker?: string;
   quantity?: number; // shares/coins
-  price?: number; // USD per unit (optional: can use historical close)
+  price?: number; // USD per unit (optional)
 
   // Cash flows
   amount?: number; // USD (positive number)
@@ -91,8 +103,6 @@ export interface Transaction {
 
 /**
  * A daily point for performance charts.
- * - totalValue: portfolio market value (positions + cash) for the date.
- * - cashBalance: optional if you model cash.
  */
 export interface PortfolioHistoryPoint {
   date: string; // YYYY-MM-DD
@@ -103,8 +113,8 @@ export interface PortfolioHistoryPoint {
 export interface PortfolioState {
   profile: UserProfile | null;
   positions: Position[];
-  transactions: Transaction[]; // NEW: for true performance over time
-  snapshots: PortfolioSnapshot[]; // historical snapshots (user-triggered / auto snapshots)
+  transactions: Transaction[];
+  snapshots: PortfolioSnapshot[];
   lastUpdated?: string;
 }
 

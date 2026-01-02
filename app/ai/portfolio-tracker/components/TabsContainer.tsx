@@ -7,6 +7,7 @@ import AllocationTab from "./AllocationTab";
 import GoalsTab from "./GoalsTab";
 import AiAdvisorTab from "./AiAdvisorTab";
 import TransactionsTab from "./TransactionsTab";
+import RebalanceTab from "./RebalanceTab";
 
 export default function TabsContainer() {
   const [tab, setTab] = useState<string>("overview");
@@ -15,6 +16,7 @@ export default function TabsContainer() {
     { value: "overview", label: "Overview" },
     { value: "allocation", label: "Allocation" },
     { value: "transactions", label: "Transactions" },
+    { value: "rebalance", label: "Rebalance" },
     { value: "goals", label: "Goals" },
     { value: "advisor", label: "AI Advisor" },
   ];
@@ -33,6 +35,10 @@ export default function TabsContainer() {
 
       <TabPanel when="transactions" value={tab}>
         <TransactionsTab />
+      </TabPanel>
+
+      <TabPanel when="rebalance" value={tab}>
+        <RebalanceTab />
       </TabPanel>
 
       <TabPanel when="goals" value={tab}>

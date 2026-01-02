@@ -6,12 +6,8 @@ import { Button } from "@/components/ui/Button";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
 import { fmtMoney, fmtNumber } from "@/lib/format";
-import {
-  cashFlowsFromTransactions,
-  twr,
-  xirr,
-  xirrCashFlowsWithTerminalValue,
-} from "@/lib/performance";
+import { cashFlowsFromTransactions, twr, xirr, xirrCashFlowsWithTerminalValue } from "@/lib/performance";
+import { annualizedVolatility, betaFromReturnSeries, dailyReturns, maxDrawdown } from "@/lib/risk";
 import {
   LineChart,
   Line,
@@ -40,10 +36,7 @@ function fmtSignedPct(n: number, decimals = 2) {
 }
 
 function formatAxisDate(iso: string) {
-  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
+  return new Date(iso + "T00:00:00Z").toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function formatTooltipDate(iso: string) {
@@ -84,15 +77,11 @@ async function fetchHistoryTicker(opts: {
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(`/api/history?${qs.toString()}`, {
-      cache: "no-store",
-      signal: controller.signal,
-    });
+    const res = await fetch(`/api/history?${qs.toString()}`, { cache: "no-store", signal: controller.signal });
     if (!res.ok) return [];
 
     const json = (await res.json()) as HistoryResponse;
-    const series = (json?.data?.[ticker] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
-    return series;
+    return (json?.data?.[ticker] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
   } catch {
     return [];
   } finally {
@@ -102,7 +91,6 @@ async function fetchHistoryTicker(opts: {
 
 function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => void }) {
   const { value, onChange } = props;
-
   const pillBase = "px-4 py-2 rounded-full text-sm font-semibold transition border";
   const active = "bg-black text-white border-black";
   const inactive = "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200";
@@ -136,13 +124,14 @@ function MetricCard(props: {
     <Card className="h-full">
       <CardContent className="p-5">
         <p className="text-sm font-medium text-gray-600">{title}</p>
-
         <div className="mt-3 min-h-[52px] flex flex-col justify-center">
           <div className={`text-2xl font-semibold tracking-tight text-gray-900 leading-none ${valueClassName ?? ""}`}>
             {value}
           </div>
           {subValue ? (
-            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>{subValue}</div>
+            <div className={`mt-2 text-sm font-medium leading-none ${subValueClassName ?? "text-gray-600"}`}>
+              {subValue}
+            </div>
           ) : null}
         </div>
       </CardContent>
@@ -152,9 +141,7 @@ function MetricCard(props: {
 
 /** "Nice" Y-axis ticks (rounded numbers) */
 function niceTicks(min: number, max: number, count: number, mode: ChartMode): { ticks: number[]; domain: [number, number] } {
-  if (!Number.isFinite(min) || !Number.isFinite(max) || count < 2) {
-    return { ticks: [0, 1], domain: [0, 1] };
-  }
+  if (!Number.isFinite(min) || !Number.isFinite(max) || count < 2) return { ticks: [0, 1], domain: [0, 1] };
   if (min === max) {
     const pad = mode === "dollar" ? Math.max(10, Math.abs(min) * 0.02) : Math.max(0.5, Math.abs(min) * 0.1);
     return niceTicks(min - pad, max + pad, count, mode);
@@ -187,21 +174,25 @@ function niceTicks(min: number, max: number, count: number, mode: ChartMode): { 
   return { ticks, domain: [niceMin, niceMax] };
 }
 
-function isExternalCashTx(t: any): boolean {
+type TxLike = { type?: string; date?: string; amount?: number };
+
+function isExternalCashTx(t: TxLike): boolean {
   return t?.type === "CASH_DEPOSIT" || t?.type === "CASH_WITHDRAWAL";
 }
 
-function sumNetContributions(transactions: any[], cutoffISO?: string, terminalISO?: string): number {
+/**
+ * Net contributions (for display): deposits positive, withdrawals negative
+ */
+function sumNetContributions(transactions: TxLike[], cutoffISO?: string, terminalISO?: string): number {
   const txs = Array.isArray(transactions) ? transactions : [];
   return txs
     .filter(isExternalCashTx)
     .filter((t) => typeof t?.date === "string")
-    .filter((t) => (!cutoffISO ? true : t.date >= cutoffISO))
-    .filter((t) => (!terminalISO ? true : t.date <= terminalISO))
+    .filter((t) => (!cutoffISO ? true : (t.date as string) >= cutoffISO))
+    .filter((t) => (!terminalISO ? true : (t.date as string) <= terminalISO))
     .reduce((acc, t) => {
       const amt = Number(t?.amount ?? 0);
       if (!Number.isFinite(amt)) return acc;
-      // deposit = +amount, withdrawal = -amount
       return acc + (t.type === "CASH_WITHDRAWAL" ? -Math.abs(amt) : Math.abs(amt));
     }, 0);
 }
@@ -241,12 +232,7 @@ export default function OverviewTab() {
       setHistoryError(null);
 
       try {
-        const series = await fetchPortfolioSeries({
-          positions: state.positions,
-          profile: state.profile,
-          interval: "1d",
-        });
-
+        const series = await fetchPortfolioSeries({ positions: state.positions, profile: state.profile, interval: "1d" });
         if (reqId !== reqIdRef.current) return;
         setHistorySeries(series);
       } catch (e) {
@@ -293,16 +279,9 @@ export default function OverviewTab() {
       const end = filteredHistorySeries[filteredHistorySeries.length - 1].date;
 
       setBenchLoading(true);
-
-      const raw = await fetchHistoryTicker({
-        ticker: "SPY",
-        start,
-        end,
-        interval: "1d",
-      });
+      const raw = await fetchHistoryTicker({ ticker: "SPY", start, end, interval: "1d" });
 
       if (benchReqId !== benchReqIdRef.current) return;
-
       setBenchSeries(raw);
       setBenchLoading(false);
     }
@@ -312,7 +291,8 @@ export default function OverviewTab() {
 
   const { kpis, chartData, yAxis, updates, killer, periodLabel } = useMemo(() => {
     const totalValue = state.positions.reduce((acc, p) => {
-      const unit = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+      const unit =
+        typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
       return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
     }, 0);
 
@@ -397,15 +377,21 @@ export default function OverviewTab() {
     const terminalDate = perfSeries.length ? perfSeries.at(-1)!.date : todayISO();
 
     const flowsTf = flowsAll
-      .filter((f: any) => typeof f?.date === "string" && typeof f?.amount === "number")
-      .filter((f: any) => (!cutoffISO ? true : f.date >= cutoffISO))
-      .filter((f: any) => f.date <= terminalDate);
+      .filter((f) => typeof f?.date === "string" && typeof f?.amount === "number")
+      .filter((f) => (!cutoffISO ? true : f.date >= cutoffISO))
+      .filter((f) => f.date <= terminalDate);
 
     const twrValue = perfSeries.length >= 2 ? twr(perfSeries, flowsTf) : null; // cumulative fraction
     const irrFlows = xirrCashFlowsWithTerminalValue(flowsTf, terminalDate, terminalValue);
-    const xirrValue = xirr(irrFlows); // annualized fraction (may be null/NaN depending on implementation)
+    const xirrValue = xirr(irrFlows); // annualized fraction
 
     const netContrib = sumNetContributions(state.transactions ?? [], cutoffISO, terminalDate);
+
+    // ---- Contribution vs Market Growth (timeframe-aware) ----
+    const tfStartValue = perfSeries.length ? perfSeries[0].value : 0;
+    const tfEndValue = perfSeries.length ? perfSeries.at(-1)!.value : 0;
+    const tfTotalChange = tfEndValue - tfStartValue;
+    const tfMarketGrowth = tfTotalChange - netContrib;
 
     const timeframeLabel = timeframe === "1m" ? " (1M)" : timeframe === "1y" ? " (1Y)" : " (All)";
 
@@ -423,7 +409,8 @@ export default function OverviewTab() {
 
       const rows = state.positions
         .map((p) => {
-          const current = typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+          const current =
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
           const cost = Number(p.costBasisPerUnit) || 0;
           const qty = Number(p.quantity) || 0;
           const pnl = (current - cost) * qty;
@@ -440,7 +427,30 @@ export default function OverviewTab() {
     })();
 
     const hasAnyTx = Array.isArray(state.transactions) && state.transactions.length > 0;
-    const hasAnyFlow = flowsAll.some((f: any) => Number(f?.amount) !== 0);
+    const hasAnyFlow = flowsAll.some((f) => Number(f?.amount) !== 0);
+
+    // ---- Risk metrics (computed off aligned dollars) ----
+    const portSeriesForRisk = aligned.map((p) => ({ date: p.d, value: p.totalDollar }));
+    const portR = dailyReturns(portSeriesForRisk).map((x) => x.r);
+
+    const riskVol = annualizedVolatility(portR); // fraction
+    const riskMdd = maxDrawdown(portSeriesForRisk); // negative fraction
+
+    let riskBeta: number | null = null;
+    let betaSamples = 0;
+    
+    if (showBenchmark) {
+      const benchSeriesForRisk = aligned
+        .filter((p) => typeof p.benchDollar === "number" && p.benchDollar !== null)
+        .map((p) => ({ date: p.d, value: p.benchDollar as number }));
+    
+      const portRetSeries = dailyReturns(portSeriesForRisk);
+      const benchRetSeries = dailyReturns(benchSeriesForRisk);
+    
+      const betaRes = betaFromReturnSeries(portRetSeries, benchRetSeries, 20);
+      riskBeta = betaRes.beta;
+      betaSamples = betaRes.n;
+    }
 
     return {
       kpis: {
@@ -449,11 +459,23 @@ export default function OverviewTab() {
         dayChange: periodChange,
         sinceStartDollar,
         sinceStartPercent,
+
         twr: twrValue, // fraction
         xirr: typeof xirrValue === "number" && Number.isFinite(xirrValue) ? xirrValue : null, // fraction
         netContrib,
         hasTx: hasAnyTx,
         hasFlows: hasAnyFlow,
+
+        // Task A
+        tfStartValue,
+        tfEndValue,
+        tfTotalChange,
+        tfMarketGrowth,
+
+        riskVol, // fraction
+        riskMdd, // negative fraction
+        riskBeta, // number
+        betaSamples,
       },
       chartData: aligned,
       yAxis: { ticks, domain },
@@ -500,10 +522,38 @@ export default function OverviewTab() {
     </div>
   );
 
+  const riskSub = (
+    <span className="text-gray-600">
+      {typeof kpis.riskMdd === "number" ? `Max DD: ${fmtNumber(kpis.riskMdd * 100, 1)}%` : "Max DD: needs more history"}
+      {showBenchmark ? (
+        typeof kpis.riskBeta === "number" ? (
+          ` • Beta: ${fmtNumber(kpis.riskBeta, 2)}`
+        ) : (
+          ` • Beta: ${kpis.betaSamples >= 2 ? "needs more history" : "enable benchmark"}`
+        )
+      ) : (
+        ""
+      )}
+    </span>
+  );
+  
+
+  // ---- Task A UI helpers (stacked bar) ----
+  const contribAbs = Math.abs(kpis.netContrib ?? 0);
+  const growthAbs = Math.abs(kpis.tfMarketGrowth ?? 0);
+  const denom = Math.max(contribAbs + growthAbs, 1);
+  const contribPct = (contribAbs / denom) * 100;
+  const growthPct = (growthAbs / denom) * 100;
+
+  const contribIsPos = (kpis.netContrib ?? 0) >= 0;
+  const growthIsPos = (kpis.tfMarketGrowth ?? 0) >= 0;
+
+  const tfLabel = timeframe === "1m" ? "1M" : timeframe === "1y" ? "1Y" : "All";
+
   return (
     <div className="space-y-4">
-      {/* 5-up on desktop so True Performance fits cleanly */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      {/* 6-up on desktop so True Performance + Risk Metrics fit cleanly */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
         <MetricCard title="Total Portfolio Value" value={fmtMoney(kpis.totalValue)} />
 
         <MetricCard
@@ -543,19 +593,101 @@ export default function OverviewTab() {
           subValue={truePerfSub}
           subValueClassName="text-gray-600"
         />
+
+        <MetricCard
+          title="Risk Metrics"
+          value={typeof kpis.riskVol === "number" ? `${fmtNumber(kpis.riskVol * 100, 1)}%` : "—"}
+          subValue={riskSub}
+          valueClassName="text-gray-900"
+          subValueClassName="text-gray-600"
+        />
       </div>
+
+      {/* Task A: Contribution vs Market Growth */}
+      <Card>
+        <CardContent className="p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <div className="text-sm font-medium text-gray-600">Contribution vs Market Growth</div>
+              <div className="mt-1 text-xs text-gray-500">Timeframe: {tfLabel}</div>
+            </div>
+            <div className="text-xs text-gray-500 text-right">
+              Start: <span className="font-medium text-gray-700">{fmtMoney(kpis.tfStartValue ?? 0)}</span>
+              <br />
+              End: <span className="font-medium text-gray-700">{fmtMoney(kpis.tfEndValue ?? 0)}</span>
+            </div>
+          </div>
+
+          {chartData.length < 2 ? (
+            <div className="mt-3 text-sm text-gray-600">Add positions (with purchase dates) to see this breakdown.</div>
+          ) : (
+            <>
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-xs font-medium text-gray-500">Net contributions</div>
+                  <div className={`mt-1 text-lg font-semibold ${contribIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                    {kpis.netContrib >= 0 ? "+" : ""}
+                    {fmtMoney(kpis.netContrib ?? 0)}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border bg-white p-3">
+                  <div className="text-xs font-medium text-gray-500">Market growth</div>
+                  <div className={`mt-1 text-lg font-semibold ${growthIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                    {kpis.tfMarketGrowth >= 0 ? "+" : ""}
+                    {fmtMoney(kpis.tfMarketGrowth ?? 0)}
+                  </div>
+                </div>
+              </div>
+
+              {/* Stacked bar (uses absolute contribution/growth for proportions) */}
+              <div className="mt-4">
+                <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100 border">
+                  <div className="h-full flex">
+                    <div
+                      className={contribIsPos ? "bg-emerald-500" : "bg-red-500"}
+                      style={{ width: `${contribPct}%` }}
+                      title={`Net contributions: ${fmtMoney(kpis.netContrib ?? 0)}`}
+                    />
+                    <div
+                      className={growthIsPos ? "bg-slate-800" : "bg-red-700"}
+                      style={{ width: `${growthPct}%` }}
+                      title={`Market growth: ${fmtMoney(kpis.tfMarketGrowth ?? 0)}`}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`} />
+                    <span>Contrib ({fmtNumber(contribPct, 0)}%)</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`} />
+                    <span>Growth ({fmtNumber(growthPct, 0)}%)</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 text-xs text-gray-500">
+                Check: (End − Start) ={" "}
+                <span className="font-medium text-gray-700">
+                  {kpis.tfTotalChange >= 0 ? "+" : ""}
+                  {fmtMoney(kpis.tfTotalChange ?? 0)}
+                </span>{" "}
+                = Contrib + Growth
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <TimeframePills value={timeframe} onChange={setTimeframe} />
 
           <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-2 text-sm text-gray-700 select-none">
-            <input
-              type="checkbox"
-              className="h-4 w-4"
-              checked={showBenchmark}
-              onChange={(e) => setShowBenchmark(e.target.checked)}
-            />
+            <input type="checkbox" className="h-4 w-4" checked={showBenchmark} onChange={(e) => setShowBenchmark(e.target.checked)} />
             <span className="font-medium">S&amp;P 500</span>
           </label>
         </div>
@@ -617,17 +749,13 @@ export default function OverviewTab() {
                         <div className="space-y-1 mb-2">
                           <div className="flex justify-between gap-6">
                             <span className="text-gray-600">Portfolio</span>
-                            <span className="font-semibold">
-                              {mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}
-                            </span>
+                            <span className="font-semibold">{mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}</span>
                           </div>
 
                           {showBenchmark && point.b !== null && (
                             <div className="flex justify-between gap-6">
                               <span className="text-gray-600">S&amp;P 500 (SPY)</span>
-                              <span className="font-semibold">
-                                {mode === "dollar" ? fmtMoney(point.benchDollar ?? 0) : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
-                              </span>
+                              <span className="font-semibold">{mode === "dollar" ? fmtMoney(point.benchDollar ?? 0) : `${fmtNumber(point.benchPct ?? 0, 2)}%`}</span>
                             </div>
                           )}
                         </div>
