@@ -292,9 +292,10 @@ export async function fetchPortfolioSeries(opts: {
 
     const json = (await res.json()) as HistoryResponse;
     const data = json?.data || {};
-    const returnedKeys = Array.isArray(json?.tickers) ? json.tickers : Object.keys(data);
+    const returnedKeys = Array.isArray(json?.tickers) && json.tickers.length ? json.tickers : Object.keys(data);
 
     // Build a mapping: requested ticker -> actual response key (if different)
+    // ALSO: keep a reverse mapping so breakdown uses the user's requested ticker consistently.
     const resolvedKeyByRequested = new Map<string, string>();
     for (const req of requestedTickers) {
       const hit = pickPayloadForRequestedTicker(data, returnedKeys, req);
@@ -310,7 +311,7 @@ export async function fetchPortfolioSeries(opts: {
       for (const pt of pts) allDates.add(pt.date);
     }
 
-    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
+    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b.date));
 
     // No dates => fallback flat
     if (dates.length === 0) {
