@@ -19,9 +19,9 @@ import {
 } from "recharts";
 
 /**
- * ✅ NOTE:
- * - Keep visuals clean, stable, and mobile-friendly.
- * - AllocationTab does NOT hardcode chart colors.
+ * ✅ Color is back:
+ * - Deterministic mapping (asset class -> color)
+ * - Same colors used across Pie + Stacked Bars + Legends
  */
 
 const moneyFmt0 = new Intl.NumberFormat(undefined, {
@@ -78,11 +78,29 @@ function scoreLabel(score: number) {
   return { tier: "Poor", hint: "Highly concentrated—consider spreading risk." };
 }
 
+/** A tasteful palette (repeat-safe). */
+const CHART_COLORS = [
+  "#2563eb", // blue
+  "#16a34a", // green
+  "#f59e0b", // amber
+  "#ef4444", // red
+  "#8b5cf6", // violet
+  "#06b6d4", // cyan
+  "#f97316", // orange
+  "#22c55e", // bright green
+  "#0ea5e9", // sky
+  "#a855f7", // purple
+];
+
+function colorForIndex(i: number) {
+  return CHART_COLORS[i % CHART_COLORS.length];
+}
+
 export default function AllocationTab() {
   const { state, diversificationScore, diversificationDetails, topConcentrations } = usePortfolioState();
   const isMobile = useMediaQuery("(max-width: 640px)");
 
-  const { assetData, accountData, total, stackedAccountRows, assetKeys } = useMemo(() => {
+  const { assetData, accountData, total, stackedAccountRows, assetKeys, assetColorMap } = useMemo(() => {
     const byAsset = new Map<string, number>();
     const byAccount = new Map<string, number>();
     const byAccountAsset = new Map<string, Map<string, number>>();
@@ -120,6 +138,10 @@ export default function AllocationTab() {
     // stable ordering for stacks + legend
     const assetKeys = assetData.map((d) => d.name);
 
+    // deterministic asset->color mapping
+    const assetColorMap: Record<string, string> = {};
+    assetKeys.forEach((k, i) => (assetColorMap[k] = colorForIndex(i)));
+
     const stackedAccountRows = accountData.map((acc) => {
       const row: Record<string, any> = { name: acc.name, total: acc.value };
       const inner = byAccountAsset.get(acc.name) ?? new Map();
@@ -127,7 +149,7 @@ export default function AllocationTab() {
       return row;
     });
 
-    return { assetData, accountData, total, stackedAccountRows, assetKeys };
+    return { assetData, accountData, total, stackedAccountRows, assetKeys, assetColorMap };
   }, [state.positions]);
 
   const tierMeta = scoreLabel(diversificationScore);
@@ -162,9 +184,8 @@ export default function AllocationTab() {
                         label={false}
                         isAnimationActive={false}
                       >
-                        {/* no explicit fill colors */}
-                        {assetData.map((d) => (
-                          <Cell key={d.name} />
+                        {assetData.map((d, i) => (
+                          <Cell key={d.name} fill={assetColorMap[d.name] ?? colorForIndex(i)} />
                         ))}
                       </Pie>
 
@@ -217,11 +238,14 @@ export default function AllocationTab() {
                   </ResponsiveContainer>
                 </div>
 
-                {/* Custom legend (neutral) */}
+                {/* Custom legend (now color-matched) */}
                 <div className={`mt-4 grid ${isMobile ? "grid-cols-2" : "grid-cols-3"} gap-x-5 gap-y-3`}>
                   {assetData.map((d) => (
                     <div key={d.name} className="flex items-start gap-2">
-                      <span className="mt-1.5 h-2.5 w-2.5 rounded-full shrink-0 bg-gray-300" />
+                      <span
+                        className="mt-1.5 h-2.5 w-2.5 rounded-full shrink-0"
+                        style={{ background: assetColorMap[d.name] }}
+                      />
                       <div className="min-w-0 w-full">
                         <div className="flex items-baseline justify-between gap-2">
                           <div className="text-xs font-medium text-gray-800 truncate">{shortAssetName(d.name)}</div>
@@ -296,7 +320,10 @@ export default function AllocationTab() {
                                 {rows.map((r: any) => (
                                   <div key={r.dataKey} className="flex items-center justify-between gap-4">
                                     <div className="flex items-center gap-2 min-w-0">
-                                      <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
+                                      <span
+                                        className="h-2.5 w-2.5 rounded-full"
+                                        style={{ background: assetColorMap[String(r.dataKey)] ?? "#d1d5db" }}
+                                      />
                                       <span className="text-gray-700 truncate">{shortAssetName(String(r.dataKey))}</span>
                                     </div>
                                     <span className="font-medium text-gray-900 tabular-nums">
@@ -313,25 +340,24 @@ export default function AllocationTab() {
                       {/* invisible total for tooltip */}
                       <Bar dataKey="total" fill="transparent" stackId="__total" />
 
-                      {/* no explicit fill colors */}
                       {assetKeys.map((k) => (
-                        <Bar key={k} dataKey={k} stackId="acct" isAnimationActive={false} />
+                        <Bar key={k} dataKey={k} stackId="acct" fill={assetColorMap[k]} isAnimationActive={false} />
                       ))}
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
 
-                {/* Legend (neutral) */}
+                {/* Legend (now color-matched) */}
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-700">
                   {assetKeys.map((k) => (
                     <div key={k} className="flex items-center gap-2">
-                      <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ background: assetColorMap[k] }} />
                       <span className="font-medium">{shortAssetName(k)}</span>
                     </div>
                   ))}
                 </div>
 
-                {/* ✅ Replaces the old “bubbles” with a clean mini-table */}
+                {/* Mini table */}
                 <div className="mt-3 overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead className="text-gray-500 border-b">
