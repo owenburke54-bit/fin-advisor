@@ -664,6 +664,7 @@ export default function OverviewTab() {
         />
       </div>
 
+      {/* Contribution vs Market Growth */}
       <Card>
         <CardContent className="p-5">
           <div className="flex items-start justify-between gap-4">
@@ -671,10 +672,10 @@ export default function OverviewTab() {
               <div className="text-sm font-medium text-gray-600">Contribution vs Market Growth</div>
               <div className="mt-1 text-xs text-gray-500">Timeframe: {tfLabel}</div>
             </div>
+
+            {/* ✅ Removed Start/End (they were inaccurate) */}
             <div className="text-xs text-gray-500 text-right">
-              Start: <span className="font-medium text-gray-700">{fmtMoney(kpis.tfStartValue ?? 0)}</span>
-              <br />
-              End: <span className="font-medium text-gray-700">{fmtMoney(kpis.tfEndValue ?? 0)}</span>
+              As of <span className="font-medium text-gray-700">{new Date().toLocaleDateString()}</span>
             </div>
           </div>
 
@@ -683,23 +684,24 @@ export default function OverviewTab() {
           ) : (
             <>
               <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="rounded-lg border bg-white p-3">
+                <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-medium text-gray-500">Net contributions</div>
-                  <div className={`mt-1 text-lg font-semibold ${contribIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                  <div className={`mt-1 text-xl font-semibold tabular-nums ${contribIsPos ? "text-emerald-700" : "text-red-700"}`}>
                     {kpis.netContrib >= 0 ? "+" : ""}
                     {fmtMoney(kpis.netContrib ?? 0)}
                   </div>
                 </div>
 
-                <div className="rounded-lg border bg-white p-3">
+                <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-medium text-gray-500">Market growth</div>
-                  <div className={`mt-1 text-lg font-semibold ${growthAbs >= 0 ? "text-emerald-700" : "text-red-700"}`}>
+                  <div className={`mt-1 text-xl font-semibold tabular-nums ${growthIsPos ? "text-emerald-700" : "text-red-700"}`}>
                     {kpis.tfMarketGrowth >= 0 ? "+" : ""}
                     {fmtMoney(kpis.tfMarketGrowth ?? 0)}
                   </div>
                 </div>
               </div>
 
+              {/* cleaner bar */}
               <div className="mt-4">
                 <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100 border">
                   <div className="h-full flex">
@@ -719,18 +721,18 @@ export default function OverviewTab() {
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
                   <div className="flex items-center gap-2">
                     <span className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`} />
-                    <span>Contrib ({fmtNumber(contribPct, 0)}%)</span>
+                    <span className="tabular-nums">Contrib ({fmtNumber(contribPct, 0)}%)</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <span className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`} />
-                    <span>Growth ({fmtNumber(growthPct, 0)}%)</span>
+                    <span className="tabular-nums">Growth ({fmtNumber(growthPct, 0)}%)</span>
                   </div>
                 </div>
               </div>
 
               <div className="mt-3 text-xs text-gray-500">
                 Check: (End − Start) ={" "}
-                <span className="font-medium text-gray-700">
+                <span className="font-medium text-gray-700 tabular-nums">
                   {kpis.tfTotalChange >= 0 ? "+" : ""}
                   {fmtMoney(kpis.tfTotalChange ?? 0)}
                 </span>{" "}
@@ -741,6 +743,7 @@ export default function OverviewTab() {
         </CardContent>
       </Card>
 
+      {/* Controls */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <TimeframePills value={timeframe} onChange={setTimeframe} />
@@ -770,8 +773,9 @@ export default function OverviewTab() {
         </div>
       </div>
 
+      {/* Trend chart (cleaner) */}
       <Card>
-        <CardContent className="h-[260px] pt-6">
+        <CardContent className="h-[280px] pt-6">
           {historyError ? (
             <p className="text-sm text-red-600">{historyError}</p>
           ) : historyLoading && chartData.length === 0 ? (
@@ -780,13 +784,22 @@ export default function OverviewTab() {
             <p className="text-sm text-gray-600">Add positions (with purchase dates) to see historical trend.</p>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="4 4" />
-                <XAxis dataKey="d" tickMargin={8} minTickGap={28} tickFormatter={formatAxisDate} />
+              <LineChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+                <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.25} />
+                <XAxis
+                  dataKey="d"
+                  tickMargin={8}
+                  minTickGap={28}
+                  tickFormatter={formatAxisDate}
+                  tickLine={false}
+                  axisLine={false}
+                />
                 <YAxis
                   domain={yAxis.domain}
                   ticks={yAxis.ticks}
                   tickFormatter={(v: number) => (mode === "dollar" ? fmtMoney(v) : `${fmtNumber(v, 1)}%`)}
+                  tickLine={false}
+                  axisLine={false}
                 />
 
                 <ReTooltip
@@ -807,13 +820,13 @@ export default function OverviewTab() {
                     entries.sort((a, b) => b[1] - a[1]);
 
                     return (
-                      <div className="rounded-md border bg-white p-3 text-sm shadow-md">
-                        <div className="font-medium mb-1">{formatTooltipDate(point.d)}</div>
+                      <div className="rounded-xl border bg-white p-3 text-sm shadow-lg">
+                        <div className="font-medium mb-2">{formatTooltipDate(point.d)}</div>
 
                         <div className="space-y-1 mb-2">
                           <div className="flex justify-between gap-6">
                             <span className="text-gray-600">Portfolio</span>
-                            <span className="font-semibold">
+                            <span className="font-semibold tabular-nums">
                               {mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}
                             </span>
                           </div>
@@ -821,7 +834,7 @@ export default function OverviewTab() {
                           {showBenchmark && point.b !== null && (
                             <div className="flex justify-between gap-6">
                               <span className="text-gray-600">S&amp;P 500 (SPY)</span>
-                              <span className="font-semibold">
+                              <span className="font-semibold tabular-nums">
                                 {mode === "dollar"
                                   ? fmtMoney(point.benchDollar ?? 0)
                                   : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
@@ -835,7 +848,7 @@ export default function OverviewTab() {
                             {entries.map(([k, v]) => (
                               <div key={k} className="flex justify-between gap-6">
                                 <span className="text-gray-600">{k}</span>
-                                <span className="font-mono">{fmtMoney(v, 0)}</span>
+                                <span className="font-mono tabular-nums">{fmtMoney(v, 0)}</span>
                               </div>
                             ))}
                           </div>
@@ -851,7 +864,7 @@ export default function OverviewTab() {
                   }}
                 />
 
-                <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2.5} dot={false} />
 
                 {showBenchmark && (
                   <Line

@@ -16,7 +16,6 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Legend,
 } from "recharts";
 
 const COLORS = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#a3a3a3"];
@@ -89,13 +88,9 @@ export default function AllocationTab() {
       const v = valueForPosition(p);
       total += v;
 
-      // Asset totals
       byAsset.set(p.assetClass, (byAsset.get(p.assetClass) ?? 0) + v);
-
-      // Account totals
       byAccount.set(p.accountType, (byAccount.get(p.accountType) ?? 0) + v);
 
-      // Account x Asset for stacked bars
       const a = p.accountType;
       if (!byAccountAsset.has(a)) byAccountAsset.set(a, new Map());
       const inner = byAccountAsset.get(a)!;
@@ -117,10 +112,8 @@ export default function AllocationTab() {
     assetData.sort((a, b) => b.value - a.value);
     accountData.sort((a, b) => b.value - a.value);
 
-    // keys = unique asset classes present, ordered by overall size (nice legend + stack order)
     const assetKeys = assetData.map((d) => d.name);
 
-    // build stacked rows: { name: "Taxable", total: 123, "ETF": 50, "Equity": 70, ... }
     const stackedAccountRows = accountData.map((acc) => {
       const row: Record<string, any> = { name: acc.name, total: acc.value };
       const inner = byAccountAsset.get(acc.name) ?? new Map();
@@ -147,23 +140,23 @@ export default function AllocationTab() {
             <CardTitle>Asset Class Allocation</CardTitle>
           </CardHeader>
 
-          {/* Slightly taller + more deliberate layout */}
-          <CardContent className="h-[360px]">
+          <CardContent className="h-[380px]">
             {total === 0 ? (
               <p className="text-sm text-gray-600">Add positions to see allocation.</p>
             ) : (
               <div className="w-full h-full flex flex-col">
-                {/* Donut area */}
-                <div className="flex-1 min-h-[210px]">
+                <div className="flex-1 min-h-[220px]">
                   <ResponsiveContainer width="100%" height="100%">
                     <PieChart>
                       <Pie
                         data={assetData}
                         dataKey="value"
                         nameKey="name"
-                        innerRadius={isMobile ? 52 : 58}
-                        outerRadius={isMobile ? 86 : 96}
+                        innerRadius={isMobile ? 62 : 72}
+                        outerRadius={isMobile ? 96 : 112}
                         paddingAngle={2}
+                        stroke="#ffffff"
+                        strokeWidth={2}
                         labelLine={false}
                         label={false}
                         isAnimationActive={false}
@@ -173,31 +166,69 @@ export default function AllocationTab() {
                         ))}
                       </Pie>
 
+                      {/* Center label (simple + reliable without SVG Label hacks) */}
+                      <text
+                        x="50%"
+                        y="47%"
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        className="fill-slate-500"
+                        style={{ fontSize: 12 }}
+                      >
+                        Total
+                      </text>
+                      <text
+                        x="50%"
+                        y="56%"
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                        className="fill-slate-900"
+                        style={{ fontSize: 18, fontWeight: 700 }}
+                      >
+                        {fmtDollar(total)}
+                      </text>
+
                       <ReTooltip
-                        formatter={(value: any, _name: any, props: any) => {
-                          const payload = props?.payload as { percent?: number; name?: string };
-                          const pct = typeof payload?.percent === "number" ? ` (${fmtPct(payload.percent)})` : "";
-                          return [`${fmtDollar(Number(value))}${pct}`, payload?.name ?? "Value"];
+                        content={({ active, payload }) => {
+                          if (!active || !payload?.length) return null;
+                          const p = payload[0] as any;
+                          const name = String(p?.name ?? "");
+                          const value = Number(p?.value ?? 0);
+                          const pct = total > 0 ? value / total : 0;
+
+                          return (
+                            <div className="rounded-xl border bg-white p-3 text-sm shadow-lg">
+                              <div className="font-semibold text-gray-900 mb-1">{shortAssetName(name)}</div>
+                              <div className="flex items-baseline justify-between gap-6">
+                                <span className="text-gray-600">Value</span>
+                                <span className="font-semibold tabular-nums">{fmtDollar(value)}</span>
+                              </div>
+                              <div className="flex items-baseline justify-between gap-6">
+                                <span className="text-gray-600">Weight</span>
+                                <span className="font-semibold tabular-nums">{fmtPct(pct)}</span>
+                              </div>
+                            </div>
+                          );
                         }}
                       />
                     </PieChart>
                   </ResponsiveContainer>
                 </div>
 
-                {/* Legend below (2 columns on mobile, 3 on desktop) */}
-                <div className={`mt-3 grid ${isMobile ? "grid-cols-2" : "grid-cols-3"} gap-x-4 gap-y-2`}>
+                {/* Cleaner custom legend (sorted, compact, professional) */}
+                <div className={`mt-4 grid ${isMobile ? "grid-cols-2" : "grid-cols-3"} gap-x-5 gap-y-3`}>
                   {assetData.map((d) => (
                     <div key={d.name} className="flex items-start gap-2">
                       <span
                         className="mt-1.5 h-2.5 w-2.5 rounded-full shrink-0"
                         style={{ backgroundColor: colorForAsset(d.name) }}
                       />
-                      <div className="min-w-0">
-                        <div className="text-xs font-medium text-gray-700 truncate">{shortAssetName(d.name)}</div>
-                        <div className="text-xs text-gray-600">
-                          <span className="font-semibold text-gray-900">{fmtPct(d.percent)}</span>{" "}
-                          <span className="text-gray-500">({fmtDollar(d.value)})</span>
+                      <div className="min-w-0 w-full">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <div className="text-xs font-medium text-gray-800 truncate">{shortAssetName(d.name)}</div>
+                          <div className="text-xs font-semibold text-gray-900 tabular-nums">{fmtPct(d.percent)}</div>
                         </div>
+                        <div className="text-xs text-gray-500 tabular-nums">{fmtDollar(d.value)}</div>
                       </div>
                     </div>
                   ))}
@@ -207,27 +238,40 @@ export default function AllocationTab() {
           </CardContent>
         </Card>
 
-        {/* Account Type Allocation (more complex + visually appealing) */}
+        {/* Account Type Allocation */}
         <Card>
           <CardHeader>
             <CardTitle>Account Type Allocation</CardTitle>
           </CardHeader>
 
-          <CardContent className="h-[360px]">
+          <CardContent className="h-[380px]">
             {total === 0 ? (
               <p className="text-sm text-gray-600">Add positions to see allocation.</p>
             ) : (
               <div className="w-full h-full flex flex-col">
                 <div className="text-xs text-gray-600 mb-2">
-                  Stacked by asset class (so you can see *what* each account holds).
+                  Stacked by asset class (so you can see <span className="font-medium">what</span> each account holds).
                 </div>
 
-                <div className="flex-1 min-h-[240px]">
+                <div className="flex-1 min-h-[245px]">
                   <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={stackedAccountRows} margin={{ left: 8, right: 12, top: 4, bottom: 6 }}>
-                      <CartesianGrid strokeDasharray="4 4" />
-                      <XAxis dataKey="name" tickMargin={8} />
-                      <YAxis tickFormatter={(v: number) => fmtDollar(v)} />
+                    <BarChart
+                      data={stackedAccountRows}
+                      margin={{ top: 8, right: 12, left: 0, bottom: 0 }}
+                      barSize={isMobile ? 28 : 36}
+                    >
+                      <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.25} />
+                      <XAxis dataKey="name" tickMargin={8} tickLine={false} axisLine={false} />
+                      <YAxis
+                        tickFormatter={(v: number) => {
+                          if (!Number.isFinite(v)) return "";
+                          if (v >= 1000) return `$${Math.round(v / 1000)}k`;
+                          return fmtDollar(v);
+                        }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+
                       <ReTooltip
                         content={({ active, payload, label }) => {
                           if (!active || !payload?.length) return null;
@@ -236,11 +280,16 @@ export default function AllocationTab() {
                             .filter((p: any) => p.dataKey !== "total" && typeof p.value === "number" && p.value > 0)
                             .sort((a: any, b: any) => (b.value ?? 0) - (a.value ?? 0));
 
-                          const accountTotal = payload.find((p: any) => p.dataKey === "total")?.value as number | undefined;
-                          const totalForAcct = typeof accountTotal === "number" ? accountTotal : rows.reduce((s: number, r: any) => s + (r.value ?? 0), 0);
+                          const accountTotal = payload.find((p: any) => p.dataKey === "total")?.value as
+                            | number
+                            | undefined;
+                          const totalForAcct =
+                            typeof accountTotal === "number"
+                              ? accountTotal
+                              : rows.reduce((s: number, r: any) => s + (r.value ?? 0), 0);
 
                           return (
-                            <div className="rounded-md border bg-white p-3 text-sm shadow-md min-w-[220px]">
+                            <div className="rounded-xl border bg-white p-3 text-sm shadow-lg min-w-[230px]">
                               <div className="font-semibold text-gray-900 mb-1">{label}</div>
                               <div className="text-xs text-gray-600 mb-2">Total: {fmtDollar(totalForAcct)}</div>
                               <div className="space-y-1">
@@ -250,7 +299,7 @@ export default function AllocationTab() {
                                       <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: r.color }} />
                                       <span className="text-gray-700 truncate">{shortAssetName(String(r.dataKey))}</span>
                                     </div>
-                                    <span className="font-medium text-gray-900">{fmtDollar(Number(r.value))}</span>
+                                    <span className="font-medium text-gray-900 tabular-nums">{fmtDollar(Number(r.value))}</span>
                                   </div>
                                 ))}
                               </div>
@@ -263,30 +312,31 @@ export default function AllocationTab() {
                       <Bar dataKey="total" fill="transparent" stackId="__total" />
 
                       {assetKeys.map((k) => (
-                        <Bar
-                          key={k}
-                          dataKey={k}
-                          stackId="acct"
-                          fill={colorForAsset(k)}
-                          radius={[6, 6, 0, 0]}
-                          isAnimationActive={false}
-                        />
+                        <Bar key={k} dataKey={k} stackId="acct" fill={colorForAsset(k)} isAnimationActive={false} />
                       ))}
-
-                      <Legend
-                        wrapperStyle={{ fontSize: 12 }}
-                        formatter={(v: any) => shortAssetName(String(v))}
-                      />
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
 
-                {/* Quick summary chips */}
+                {/* Custom legend (replaces Recharts Legend = cleaner) */}
+                <div className={`mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-700`}>
+                  {assetKeys.map((k) => (
+                    <div key={k} className="flex items-center gap-2">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: colorForAsset(k) }} />
+                      <span className="font-medium">{shortAssetName(k)}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Summary chips */}
                 <div className={`mt-3 grid ${isMobile ? "grid-cols-1" : "grid-cols-2"} gap-2`}>
                   {stackedAccountRows.map((r) => (
-                    <div key={r.name} className="rounded-lg border bg-white px-3 py-2 flex items-center justify-between">
+                    <div
+                      key={r.name}
+                      className="rounded-xl border bg-white px-3 py-2 flex items-center justify-between"
+                    >
                       <div className="text-sm font-medium text-gray-800">{r.name}</div>
-                      <div className="text-sm text-gray-900 font-semibold">
+                      <div className="text-sm text-gray-900 font-semibold tabular-nums">
                         {fmtDollar(r.total)}{" "}
                         <span className="text-gray-500 font-normal">({fmtPct(r.total / Math.max(total, 1))})</span>
                       </div>
@@ -317,32 +367,27 @@ export default function AllocationTab() {
 
           {state.positions.length > 0 && (
             <div className="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <div className="rounded-lg border bg-white p-3">
+              <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Top holding</div>
                 <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {diversificationDetails.topHoldingTicker ?? "—"} · {Math.round(diversificationDetails.topHoldingPct * 100)}%
+                  {diversificationDetails.topHoldingTicker ?? "—"} ·{" "}
+                  {Math.round(diversificationDetails.topHoldingPct * 100)}%
                 </div>
               </div>
 
-              <div className="rounded-lg border bg-white p-3">
+              <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Top 3 holdings</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {Math.round(diversificationDetails.top3Pct * 100)}%
-                </div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">{Math.round(diversificationDetails.top3Pct * 100)}%</div>
               </div>
 
-              <div className="rounded-lg border bg-white p-3">
+              <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Equity</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {Math.round(diversificationDetails.buckets.equity * 100)}%
-                </div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">{Math.round(diversificationDetails.buckets.equity * 100)}%</div>
               </div>
 
-              <div className="rounded-lg border bg-white p-3">
+              <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Cash/MM</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {Math.round(diversificationDetails.buckets.cash * 100)}%
-                </div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">{Math.round(diversificationDetails.buckets.cash * 100)}%</div>
               </div>
             </div>
           )}
