@@ -9,6 +9,7 @@ import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import type { Transaction, TxType, AccountType, Position, AssetClass } from "@/lib/types";
 import { fmtMoney } from "@/lib/format";
+import { valueForPosition } from "@/lib/portfolioStorage";
 
 const TX_TYPES: { value: TxType; label: string }[] = [
   { value: "BUY", label: "Buy" },
@@ -26,6 +27,9 @@ function todayISO() {
 function isTrade(t: TxType) {
   return t === "BUY" || t === "SELL";
 }
+function isCashFlow(t: TxType) {
+  return t === "CASH_DEPOSIT" || t === "CASH_WITHDRAWAL";
+}
 
 function makeId() {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -33,12 +37,21 @@ function makeId() {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function isCashLikePosition(p: Position): boolean {
+  return p.assetClass === "Money Market" || p.assetClass === "Cash";
+}
+
 /**
- * Rebuild positions from transaction history (TRADES ONLY), but:
- * ✅ Keep all existing positions that are NOT affected by trade keys
+ * Rebuild positions from transactions:
+ * - Trades (BUY/SELL) rebuild only keys touched by trades
+ * - Cash flows (DEPOSIT/WITHDRAWAL) update a cash-like position per account
+ *
+ * ✅ Keep all existing positions NOT affected by trade keys
  * ✅ Only replace positions for (accountType,ticker) pairs that appear in trades
+ * ✅ Apply cash flows to cash/MM WITHOUT touching other holdings
  */
 function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transaction[]): Position[] {
+  // Map seed positions by (account,ticker)
   const seedByKey = new Map<string, Position>();
   for (const p of seedPositions ?? []) {
     const key = `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
@@ -56,17 +69,36 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   const agg = new Map<string, Agg>();
   const tradeKeys = new Set<string>();
 
+  // Cash deltas by account
+  const cashDeltaByAcct = new Map<AccountType, { delta: number; earliest?: string }>();
+
   const ordered = (txs ?? [])
     .slice()
     .filter((t) => t && t.date)
     .sort((a, b) => a.date.localeCompare(b.date));
 
   for (const t of ordered) {
-    if (!t || !isTrade(t.type)) continue;
+    if (!t) continue;
 
-    const ticker = (t.ticker ?? "").toUpperCase().trim();
     const acct: AccountType = (t.accountType ?? "Taxable") as AccountType;
 
+    // --- CASH FLOWS ---
+    if (isCashFlow(t.type)) {
+      const amt = Math.abs(Number(t.amount ?? 0));
+      if (!Number.isFinite(amt) || amt <= 0) continue;
+
+      const sign = t.type === "CASH_WITHDRAWAL" ? -1 : 1;
+      const cur = cashDeltaByAcct.get(acct) ?? { delta: 0, earliest: undefined as string | undefined };
+      cur.delta += sign * amt;
+      if (!cur.earliest || t.date < cur.earliest) cur.earliest = t.date;
+      cashDeltaByAcct.set(acct, cur);
+      continue;
+    }
+
+    // --- TRADES ---
+    if (!isTrade(t.type)) continue;
+
+    const ticker = (t.ticker ?? "").toUpperCase().trim();
     const qty = Number(t.quantity ?? 0);
     if (!ticker || !Number.isFinite(qty) || qty <= 0) continue;
 
@@ -108,15 +140,14 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   }
 
   // Build updated positions for traded keys
-  const rebuilt: Position[] = [];
+  const rebuiltTrades: Position[] = [];
   for (const [key, a] of agg.entries()) {
-    // if qty is now 0, we consider the position closed
     if (a.qty <= 0) continue;
 
     const seed = seedByKey.get(key);
     const assetClass: AssetClass = (seed?.assetClass ?? "Equity") as AssetClass;
 
-    rebuilt.push({
+    rebuiltTrades.push({
       id: seed?.id ?? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : key),
       ticker: a.ticker,
       name: seed?.name ?? a.ticker,
@@ -133,14 +164,60 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   }
 
   // ✅ Keep all seed positions NOT touched by trades
+  // BUT: if we are applying cash deltas, we’ll replace the cash/MM position for those accounts
   const kept = (seedPositions ?? []).filter((p) => {
     const key = `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
-    return !tradeKeys.has(key);
+    if (tradeKeys.has(key)) return false;
+
+    const acct: AccountType = (p.accountType ?? "Taxable") as AccountType;
+    if (cashDeltaByAcct.has(acct) && isCashLikePosition(p)) return false;
+
+    return true;
   });
 
-  const out = [...kept, ...rebuilt];
+  // Apply cash deltas -> update or create a cash-like position per affected account
+  const rebuiltCash: Position[] = [];
+  for (const [acct, meta] of cashDeltaByAcct.entries()) {
+    const delta = meta.delta;
 
-  // deterministic ordering
+    // Find an existing cash-like position for this account (prefer Money Market)
+    const existing =
+      (seedPositions ?? []).find((p) => (p.accountType ?? "Taxable") === acct && p.assetClass === "Money Market") ??
+      (seedPositions ?? []).find((p) => (p.accountType ?? "Taxable") === acct && p.assetClass === "Cash") ??
+      null;
+
+    const starting = existing ? valueForPosition(existing) : 0;
+    const nextBalance = Math.max(0, starting + delta);
+
+    if (existing) {
+      // Store balance in a stable legacy-friendly way: qty=1, costBasisPerUnit=balance, currentPrice=1
+      rebuiltCash.push({
+        ...existing,
+        quantity: 1,
+        costBasisPerUnit: Number(nextBalance.toFixed(2)),
+        currentPrice: 1,
+        purchaseDate: existing.purchaseDate ?? meta.earliest,
+      });
+    } else {
+      rebuiltCash.push({
+        id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${acct}::CASH`,
+        ticker: "CASH",
+        name: "Cash",
+        assetClass: "Cash" as AssetClass,
+        accountType: acct,
+        quantity: 1,
+        costBasisPerUnit: Number(nextBalance.toFixed(2)),
+        currentPrice: 1,
+        currency: "USD",
+        sector: undefined,
+        purchaseDate: meta.earliest,
+        createdAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  const out = [...kept, ...rebuiltTrades, ...rebuiltCash];
+
   out.sort((p1, p2) => (p1.accountType + p1.ticker).localeCompare(p2.accountType + p2.ticker));
   return out;
 }
@@ -161,7 +238,7 @@ export default function TransactionsTab() {
     return (state.transactions ?? []).slice().sort((a, b) => (a.date < b.date ? 1 : -1));
   }, [state.transactions]);
 
-  // ✅ Summary: show cash flows + trade notional (so this page never looks "broken")
+  // ✅ Summary: show cash flows + trade notional
   const summary = useMemo(() => {
     let deposits = 0;
     let withdrawals = 0;
@@ -172,8 +249,11 @@ export default function TransactionsTab() {
       if (t.type === "CASH_DEPOSIT") deposits += Math.abs(Number(t.amount || 0));
       if (t.type === "CASH_WITHDRAWAL") withdrawals += Math.abs(Number(t.amount || 0));
 
-      if (t.type === "BUY" && t.price && t.quantity) buyNotional += t.price * t.quantity;
-      if (t.type === "SELL" && t.price && t.quantity) sellNotional += t.price * t.quantity;
+      const q = Number(t.quantity ?? 0);
+      const px = Number(t.price ?? NaN);
+
+      if (t.type === "BUY" && Number.isFinite(px) && Number.isFinite(q)) buyNotional += px * q;
+      if (t.type === "SELL" && Number.isFinite(px) && Number.isFinite(q)) sellNotional += px * q;
     }
 
     return {
@@ -196,8 +276,10 @@ export default function TransactionsTab() {
   }
 
   async function syncAfterTx(nextTxs: Transaction[]) {
-    // ✅ rebuild without nuking the rest of the portfolio
+    // ✅ rebuild (trades + cash flows) without nuking the rest of the portfolio
     const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
+
+    // snapshot on setPositions is fine (user action)
     setPositions(nextPositions);
 
     // ✅ refresh prices so Overview/Allocation update immediately
@@ -241,7 +323,9 @@ export default function TransactionsTab() {
 
   function describeTx(t: Transaction) {
     if (isTrade(t.type)) {
-      const notional = t.price && t.quantity ? t.price * t.quantity : null;
+      const notional =
+        typeof t.price === "number" && typeof t.quantity === "number" ? t.price * t.quantity : null;
+
       return `${t.type === "BUY" ? "Buy" : "Sell"} ${t.quantity}${
         t.price ? ` @ ${fmtMoney(t.price)}` : ""
       }${notional ? ` • ${fmtMoney(notional)}` : ""}`;

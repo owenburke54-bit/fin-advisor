@@ -59,6 +59,11 @@ export interface UsePortfolio {
   setPositions: (positions: Position[], opts?: SetOpts) => void;
   setTransactions: (txs: Transaction[], opts?: SetOpts) => void;
 
+  // ✅ safe transaction helpers (prevents accidental positions wipe)
+  addTransaction: (tx: Transaction, opts?: SetOpts) => void;
+  deleteTransaction: (id: string, opts?: SetOpts) => void;
+  updateTransaction: (tx: Transaction, opts?: SetOpts) => void;
+
   exportJSON: () => string;
   importJSON: (json: string) => void;
   exportCSV: () => string;
@@ -131,55 +136,82 @@ function usePortfolioStateImpl(): UsePortfolio {
     });
   }, []);
 
-  const refreshPrices = useCallback(async (positionsOverride?: Position[]) => {
-    const positionsToUse = positionsOverride ?? state.positions;
-
-    const tickers = Array.from(
-      new Set(
-        positionsToUse
-          .map((p) => (p.ticker || "").trim().toUpperCase())
-          .filter(Boolean),
-      ),
-    );
-
-    if (tickers.length === 0) return;
-
-    const data = await fetchPricesForTickers(tickers);
-
-    // ✅ IMPORTANT: do NOT snapshot on price refresh (prevents snapshot spam)
+  // ✅ NEW: SAFE transaction helpers (always merges via prev state)
+  const addTransaction = useCallback((tx: Transaction, opts?: SetOpts) => {
+    const snap = opts?.snapshot ?? true;
     setState((prev) => {
-      const positions = prev.positions.map((p) => {
-        const t = (p.ticker || "").toUpperCase();
-        const isCashLikeLocal = p.assetClass === "Money Market" || p.assetClass === "Cash";
-
-        const md = data[t];
-        if (!md) {
-          if (isCashLikeLocal && (typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice))) {
-            return { ...p, currentPrice: 1 };
-          }
-          return p;
-        }
-
-        return {
-          ...p,
-          currentPrice: md.price,
-          name: p.name || md.name || p.ticker,
-          sector: p.sector || md.sector,
-        };
-      });
-
-      return { ...prev, positions };
+      const next = { ...prev, transactions: [...(prev.transactions ?? []), tx] };
+      return snap ? withSnapshot(next) : next;
     });
-  }, [state.positions]);
+  }, []);
+
+  const deleteTransaction = useCallback((id: string, opts?: SetOpts) => {
+    const snap = opts?.snapshot ?? true;
+    setState((prev) => {
+      const next = { ...prev, transactions: (prev.transactions ?? []).filter((t) => t.id !== id) };
+      return snap ? withSnapshot(next) : next;
+    });
+  }, []);
+
+  const updateTransaction = useCallback((tx: Transaction, opts?: SetOpts) => {
+    const snap = opts?.snapshot ?? true;
+    setState((prev) => {
+      const nextTxs = (prev.transactions ?? []).map((t) => (t.id === tx.id ? tx : t));
+      const next = { ...prev, transactions: nextTxs };
+      return snap ? withSnapshot(next) : next;
+    });
+  }, []);
+
+  const refreshPrices = useCallback(
+    async (positionsOverride?: Position[]) => {
+      const positionsToUse = positionsOverride ?? state.positions;
+
+      const tickers = Array.from(
+        new Set(
+          positionsToUse
+            .map((p) => (p.ticker || "").trim().toUpperCase())
+            .filter(Boolean),
+        ),
+      );
+
+      if (tickers.length === 0) return;
+
+      const data = await fetchPricesForTickers(tickers);
+
+      // ✅ IMPORTANT: do NOT snapshot on price refresh (prevents snapshot spam)
+      setState((prev) => {
+        const positions = prev.positions.map((p) => {
+          const t = (p.ticker || "").toUpperCase();
+          const isCashLikeLocal = p.assetClass === "Money Market" || p.assetClass === "Cash";
+
+          const md = data[t];
+          if (!md) {
+            if (isCashLikeLocal && (typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice))) {
+              return { ...p, currentPrice: 1 };
+            }
+            return p;
+          }
+
+          return {
+            ...p,
+            currentPrice: md.price,
+            name: p.name || md.name || p.ticker,
+            sector: p.sector || md.sector,
+          };
+        });
+
+        return { ...prev, positions };
+      });
+    },
+    [state.positions],
+  );
 
   // auto-fetch prices when positions exist and any are missing prices
   useEffect(() => {
     if (loading) return;
     if (state.positions.length === 0) return;
 
-    const missingAny = state.positions.some(
-      (p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice),
-    );
+    const missingAny = state.positions.some((p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice));
 
     if (missingAny) {
       void refreshPrices(state.positions);
@@ -226,16 +258,7 @@ function usePortfolioStateImpl(): UsePortfolio {
   }
 
   const exportCSV = useCallback((): string => {
-    const header = [
-      "ticker",
-      "name",
-      "assetClass",
-      "accountType",
-      "quantity",
-      "costBasisPerUnit",
-      "purchaseDate",
-      "currentPrice",
-    ].join(",");
+    const header = ["ticker", "name", "assetClass", "accountType", "quantity", "costBasisPerUnit", "purchaseDate", "currentPrice"].join(",");
 
     const lines = state.positions.map((p) =>
       [
@@ -463,14 +486,17 @@ function usePortfolioStateImpl(): UsePortfolio {
 
     const top1Pct = top1?.percent ?? 0;
     if (top1Pct > 0.2) why.push(`Top holding is ${pctFmt(top1Pct)} (${top1?.ticker ?? "N/A"}). Target: < 20%.`);
-    else if (top1Pct > 0.1) why.push(`Top holding is ${pctFmt(top1Pct)} (${top1?.ticker ?? "N/A"}). Consider < 10–20% range.`);
+    else if (top1Pct > 0.1)
+      why.push(`Top holding is ${pctFmt(top1Pct)} (${top1?.ticker ?? "N/A"}). Consider < 10–20% range.`);
 
     if (top3Pct > 0.6) why.push(`Top 3 holdings are ${pctFmt(top3Pct)}. Target: < 60%.`);
     else if (top3Pct > 0.45) why.push(`Top 3 holdings are ${pctFmt(top3Pct)}. Consider adding more positions over time.`);
 
     const cashPct = total > 0 ? cash / total : 0;
-    if (cashPct > 0.25) why.push(`Cash/MM is ${pctFmt(cashPct)}. Target (typical): ~5–15% unless saving for near-term goals.`);
-    else if (cashPct > 0.15) why.push(`Cash/MM is ${pctFmt(cashPct)}. Consider deploying some into diversified funds if appropriate.`);
+    if (cashPct > 0.25)
+      why.push(`Cash/MM is ${pctFmt(cashPct)}. Target (typical): ~5–15% unless saving for near-term goals.`);
+    else if (cashPct > 0.15)
+      why.push(`Cash/MM is ${pctFmt(cashPct)}. Consider deploying some into diversified funds if appropriate.`);
 
     const bondsPct = total > 0 ? bonds / total : 0;
     if (bondsPct === 0 && (state.profile?.riskLevel ?? 3) <= 2) {
@@ -518,6 +544,9 @@ function usePortfolioStateImpl(): UsePortfolio {
     clearPositions,
     setPositions,
     setTransactions,
+    addTransaction,
+    deleteTransaction,
+    updateTransaction,
     exportJSON,
     importJSON,
     exportCSV,
