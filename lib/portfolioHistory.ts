@@ -150,22 +150,47 @@ function isCashLike(p: Position): boolean {
 }
 
 /**
- * Cash-like CURRENT value (for MMKT):
- * quantity=1
- * costBasisPerUnit=initial balance
- * currentPrice=current balance
+ * Cash-like CURRENT balance:
+ *
+ * We support BOTH formats:
+ * 1) Old MMKT format: quantity=1, costBasisPerUnit=initial, currentPrice=current balance
+ * 2) New "legacy-friendly" format: quantity=1, costBasisPerUnit=balance, currentPrice=1
+ *
+ * We must NOT treat currentPrice=1 as "the balance".
  */
-function cashLikeCurrentValue(p: Position): number {
-  const cp =
+function cashLikeBalance(p: Position): number {
+  const qty = toNumber(p.quantity, 0);
+  const cb = toNumber(p.costBasisPerUnit, 0);
+
+  const cpRaw = p.currentPrice;
+  const cp = typeof cpRaw === "number" && Number.isFinite(cpRaw) ? cpRaw : undefined;
+
+  // If qty===1:
+  // - If currentPrice is present and not ~1, treat it as the balance (old MMKT style).
+  // - Otherwise treat costBasisPerUnit as the balance (new CASH style).
+  if (qty === 1) {
+    if (typeof cp === "number" && Math.abs(cp - 1) > 1e-9) return cp;
+    return cb;
+  }
+
+  // If qty is not 1, fallback to qty (for older cash styles) or qty*cp if cp seems meaningful.
+  if (typeof cp === "number" && Math.abs(cp - 1) > 1e-9) return qty * cp;
+  return qty !== 0 ? qty : cb;
+}
+
+/**
+ * Current value for a position (used in fallbacks).
+ */
+function currentValueApprox(p: Position): number {
+  if (isCashLike(p)) return cashLikeBalance(p);
+
+  const qty = toNumber(p.quantity, 0);
+  const unit =
     typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
       ? p.currentPrice
-      : undefined;
-  if (typeof cp === "number") return cp;
+      : toNumber(p.costBasisPerUnit, 0);
 
-  const qty = toNumber(p.quantity);
-  const cb = toNumber(p.costBasisPerUnit);
-  if (qty === 1) return cb;
-  return qty;
+  return qty * unit;
 }
 
 /**
@@ -230,7 +255,8 @@ export async function fetchPortfolioSeries(opts: {
     const cashLike = positions.filter(isCashLike);
     const marketLike = positions.filter((p) => !isCashLike(p));
 
-    const cashConstant = cashLike.reduce((acc, p) => acc + cashLikeCurrentValue(p), 0);
+    // ✅ Correct cash/MM valuation (supports both formats)
+    const cashConstant = cashLike.reduce((acc, p) => acc + cashLikeBalance(p), 0);
 
     // Map market positions by normalized ticker (what we SEND)
     const positionsByTicker = new Map<string, Position[]>();
@@ -276,11 +302,7 @@ export async function fetchPortfolioSeries(opts: {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
-          const unit =
-            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
-              ? p.currentPrice
-              : toNumber(p.costBasisPerUnit);
-          return acc + toNumber(p.quantity) * toNumber(unit);
+          return acc + currentValueApprox(p);
         }, 0);
 
       const v = Number(approx.toFixed(2));
@@ -295,7 +317,6 @@ export async function fetchPortfolioSeries(opts: {
     const returnedKeys = Array.isArray(json?.tickers) && json.tickers.length ? json.tickers : Object.keys(data);
 
     // Build a mapping: requested ticker -> actual response key (if different)
-    // ALSO: keep a reverse mapping so breakdown uses the user's requested ticker consistently.
     const resolvedKeyByRequested = new Map<string, string>();
     for (const req of requestedTickers) {
       const hit = pickPayloadForRequestedTicker(data, returnedKeys, req);
@@ -311,18 +332,14 @@ export async function fetchPortfolioSeries(opts: {
       for (const pt of pts) allDates.add(pt.date);
     }
 
-    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
+    const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b.date));
 
     // No dates => fallback flat
     if (dates.length === 0) {
       const approx =
         cashConstant +
         marketLike.reduce((acc, p) => {
-          const unit =
-            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
-              ? p.currentPrice
-              : toNumber(p.costBasisPerUnit);
-          return acc + toNumber(p.quantity) * toNumber(unit);
+          return acc + currentValueApprox(p);
         }, 0);
 
       const v = Number(approx.toFixed(2));

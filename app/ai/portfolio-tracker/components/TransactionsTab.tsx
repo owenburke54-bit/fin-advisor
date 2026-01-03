@@ -41,35 +41,46 @@ function isCashLikePosition(p: Position): boolean {
   return p.assetClass === "Money Market" || p.assetClass === "Cash";
 }
 
+function keyFor(p: Pick<Position, "accountType" | "ticker">) {
+  return `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
+}
+
+function txKey(acct: AccountType, ticker: string) {
+  return `${acct}::${ticker.toUpperCase().trim()}`;
+}
+
 /**
- * Rebuild positions from transactions:
- * - Trades (BUY/SELL) rebuild only keys touched by trades
- * - Cash flows (DEPOSIT/WITHDRAWAL) update a cash-like position per account
+ * Rebuild positions from transactions (Model A, incremental):
+ * - Seed holdings remain the baseline
+ * - Trades adjust both: holdings AND cash (BUY consumes cash, SELL adds cash)
+ * - Cash flows adjust cash
  *
- * ✅ Keep all existing positions NOT affected by trade keys
- * ✅ Only replace positions for (accountType,ticker) pairs that appear in trades
- * ✅ Apply cash flows to cash/MM WITHOUT touching other holdings
+ * ✅ Keep all existing positions NOT affected by traded keys
+ * ✅ Replace only positions for (accountType,ticker) pairs that appear in trades,
+ *    but *start from the existing seed qty/cost* so we don’t wipe prior holdings.
+ * ✅ Apply deposits/withdrawals + trade notionals to cash/MM per account
  */
 function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transaction[]): Position[] {
   // Map seed positions by (account,ticker)
   const seedByKey = new Map<string, Position>();
   for (const p of seedPositions ?? []) {
-    const key = `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
-    if (!seedByKey.has(key)) seedByKey.set(key, p);
+    const k = keyFor(p);
+    if (!seedByKey.has(k)) seedByKey.set(k, p);
   }
 
   type Agg = {
     accountType: AccountType;
     ticker: string;
     qty: number;
-    cost: number; // weighted avg
+    cost: number; // avg cost per unit
     earliestDate?: string;
+    didInitFromSeed?: boolean;
   };
 
   const agg = new Map<string, Agg>();
   const tradeKeys = new Set<string>();
 
-  // Cash deltas by account
+  // Cash deltas by account (includes explicit cash flows AND trade notionals)
   const cashDeltaByAcct = new Map<AccountType, { delta: number; earliest?: string }>();
 
   const ordered = (txs ?? [])
@@ -77,9 +88,59 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     .filter((t) => t && t.date)
     .sort((a, b) => a.date.localeCompare(b.date));
 
+  // Helper: accumulate cash delta
+  function bumpCash(acct: AccountType, delta: number, date?: string) {
+    if (!Number.isFinite(delta) || delta === 0) return;
+    const cur = cashDeltaByAcct.get(acct) ?? { delta: 0, earliest: undefined as string | undefined };
+    cur.delta += delta;
+    if (date) {
+      if (!cur.earliest || date < cur.earliest) cur.earliest = date;
+    }
+    cashDeltaByAcct.set(acct, cur);
+  }
+
+  // Helper: get/initialize Agg for a traded key, seeded from existing holdings
+  function getAgg(acct: AccountType, ticker: string, date?: string): Agg {
+    const k = txKey(acct, ticker);
+    const existing = agg.get(k);
+    if (existing) {
+      if (date && (!existing.earliestDate || date < existing.earliestDate)) existing.earliestDate = date;
+      return existing;
+    }
+
+    const seed = seedByKey.get(k);
+    const seededQty = seed?.quantity ?? 0;
+    const seededCost = seed?.costBasisPerUnit ?? 0;
+
+    const a: Agg = {
+      accountType: acct,
+      ticker: ticker.toUpperCase().trim(),
+      qty: Number.isFinite(seededQty) ? seededQty : 0,
+      cost: Number.isFinite(seededCost) ? seededCost : 0,
+      earliestDate: date,
+      didInitFromSeed: !!seed,
+    };
+
+    agg.set(k, a);
+    return a;
+  }
+
+  // Helper: determine a trade price to use for notional/cost updates
+  function tradePriceToUse(acct: AccountType, ticker: string, rawPx: unknown): number | null {
+    const px = Number(rawPx);
+    if (Number.isFinite(px) && px > 0) return px;
+
+    const seed = seedByKey.get(txKey(acct, ticker));
+    const seedPxCandidates = [seed?.currentPrice, seed?.costBasisPerUnit].map((v) => Number(v));
+    for (const c of seedPxCandidates) {
+      if (Number.isFinite(c) && c > 0) return c;
+    }
+
+    return null;
+  }
+
   for (const t of ordered) {
     if (!t) continue;
-
     const acct: AccountType = (t.accountType ?? "Taxable") as AccountType;
 
     // --- CASH FLOWS ---
@@ -88,10 +149,7 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
       if (!Number.isFinite(amt) || amt <= 0) continue;
 
       const sign = t.type === "CASH_WITHDRAWAL" ? -1 : 1;
-      const cur = cashDeltaByAcct.get(acct) ?? { delta: 0, earliest: undefined as string | undefined };
-      cur.delta += sign * amt;
-      if (!cur.earliest || t.date < cur.earliest) cur.earliest = t.date;
-      cashDeltaByAcct.set(acct, cur);
+      bumpCash(acct, sign * amt, t.date);
       continue;
     }
 
@@ -102,26 +160,16 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     const qty = Number(t.quantity ?? 0);
     if (!ticker || !Number.isFinite(qty) || qty <= 0) continue;
 
-    const key = `${acct}::${ticker}`;
-    tradeKeys.add(key);
+    const k = txKey(acct, ticker);
+    tradeKeys.add(k);
 
-    const cur = agg.get(key) ?? { accountType: acct, ticker, qty: 0, cost: 0, earliestDate: undefined };
-    if (!cur.earliestDate || t.date < cur.earliestDate) cur.earliestDate = t.date;
+    const cur = getAgg(acct, ticker, t.date);
+
+    const pxToUse = tradePriceToUse(acct, ticker, t.price);
 
     if (t.type === "BUY") {
-      const px = Number(t.price ?? NaN);
-
-      // fallback: if user left price blank, try seed cost basis
-      const fallbackSeed = seedByKey.get(key);
-      const pxToUse =
-        Number.isFinite(px) && px > 0
-          ? px
-          : typeof fallbackSeed?.costBasisPerUnit === "number" && Number.isFinite(fallbackSeed.costBasisPerUnit)
-            ? fallbackSeed.costBasisPerUnit
-            : NaN;
-
-      if (!Number.isFinite(pxToUse) || pxToUse <= 0) continue;
-
+      // Update holdings
+      if (pxToUse == null) continue; // cannot compute cost/notional reliably
       const oldQty = cur.qty;
       const oldCost = cur.cost;
 
@@ -130,25 +178,35 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
 
       cur.qty = newQty;
       cur.cost = newCost;
-      agg.set(key, cur);
+      agg.set(k, cur);
+
+      // Model A cash impact: BUY consumes cash
+      bumpCash(acct, -(qty * pxToUse), t.date);
     }
 
     if (t.type === "SELL") {
+      // For SELL, we still want cash impact even if price missing; use fallback
+      if (pxToUse == null) continue;
+
       cur.qty = Math.max(0, cur.qty - qty);
-      agg.set(key, cur);
+      agg.set(k, cur);
+
+      // Model A cash impact: SELL adds cash
+      bumpCash(acct, +(qty * pxToUse), t.date);
     }
   }
 
-  // Build updated positions for traded keys
+  // Build updated positions for traded keys (preserving seed metadata)
   const rebuiltTrades: Position[] = [];
-  for (const [key, a] of agg.entries()) {
-    if (a.qty <= 0) continue;
+  for (const [k, a] of agg.entries()) {
+    // If qty ends at 0, we drop the position (like fully sold)
+    if (!Number.isFinite(a.qty) || a.qty <= 0) continue;
 
-    const seed = seedByKey.get(key);
+    const seed = seedByKey.get(k);
     const assetClass: AssetClass = (seed?.assetClass ?? "Equity") as AssetClass;
 
     rebuiltTrades.push({
-      id: seed?.id ?? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : key),
+      id: seed?.id ?? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : k),
       ticker: a.ticker,
       name: seed?.name ?? a.ticker,
       assetClass,
@@ -156,7 +214,7 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
       quantity: Number(a.qty.toFixed(8)),
       costBasisPerUnit: Number(a.cost.toFixed(6)),
       currentPrice: seed?.currentPrice,
-      currency: "USD",
+      currency: seed?.currency ?? "USD",
       sector: seed?.sector,
       purchaseDate: seed?.purchaseDate ?? a.earliestDate,
       createdAt: seed?.createdAt ?? new Date().toISOString(),
@@ -166,8 +224,8 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   // ✅ Keep all seed positions NOT touched by trades
   // BUT: if we are applying cash deltas, we’ll replace the cash/MM position for those accounts
   const kept = (seedPositions ?? []).filter((p) => {
-    const key = `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
-    if (tradeKeys.has(key)) return false;
+    const k = keyFor(p);
+    if (tradeKeys.has(k)) return false;
 
     const acct: AccountType = (p.accountType ?? "Taxable") as AccountType;
     if (cashDeltaByAcct.has(acct) && isCashLikePosition(p)) return false;
@@ -187,10 +245,12 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
       null;
 
     const starting = existing ? valueForPosition(existing) : 0;
-    const nextBalance = Math.max(0, starting + delta);
+
+    // In Model A we allow cash to go negative if you buy without deposits (margin/overdraft).
+    // If you want to clamp at 0, change this to Math.max(0, starting + delta).
+    const nextBalance = starting + delta;
 
     if (existing) {
-      // Store balance in a stable legacy-friendly way: qty=1, costBasisPerUnit=balance, currentPrice=1
       rebuiltCash.push({
         ...existing,
         quantity: 1,
@@ -217,7 +277,6 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   }
 
   const out = [...kept, ...rebuiltTrades, ...rebuiltCash];
-
   out.sort((p1, p2) => (p1.accountType + p1.ticker).localeCompare(p2.accountType + p2.ticker));
   return out;
 }
@@ -238,7 +297,7 @@ export default function TransactionsTab() {
     return (state.transactions ?? []).slice().sort((a, b) => (a.date < b.date ? 1 : -1));
   }, [state.transactions]);
 
-  // ✅ Summary: show cash flows + trade notional
+  // Summary
   const summary = useMemo(() => {
     let deposits = 0;
     let withdrawals = 0;
@@ -276,13 +335,8 @@ export default function TransactionsTab() {
   }
 
   async function syncAfterTx(nextTxs: Transaction[]) {
-    // ✅ rebuild (trades + cash flows) without nuking the rest of the portfolio
     const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
-
-    // snapshot on setPositions is fine (user action)
     setPositions(nextPositions);
-
-    // ✅ refresh prices so Overview/Allocation update immediately
     await refreshPrices(nextPositions);
   }
 

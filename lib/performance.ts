@@ -14,15 +14,38 @@ function safe(n: number) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function isISODate(s: unknown): s is string {
+  return typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+}
+
+function sumByDate(flows: CashFlow[]): CashFlow[] {
+  const byDate = new Map<string, number>();
+  for (const f of flows) {
+    if (!isISODate(f.date)) continue;
+    const amt = safe(f.amount);
+    if (amt === 0) continue;
+    byDate.set(f.date, (byDate.get(f.date) ?? 0) + amt);
+  }
+
+  return Array.from(byDate.entries())
+    .map(([date, amount]) => ({ date, amount }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
 /**
  * Build external cash flows from transactions.
- * Convention (investor perspective):
+ *
+ * Convention (INVESTOR perspective):
  * - CASH_DEPOSIT: investor puts money in => negative cash flow (out of pocket)
  * - CASH_WITHDRAWAL: investor takes money out => positive cash flow (to pocket)
  *
- * Trades (BUY/SELL) are internal by default. If includeTrades=true and price is present:
- * - BUY: negative (cash out of pocket)
- * - SELL: positive (cash to pocket)
+ * ✅ Model A default:
+ * - Trades (BUY/SELL) are INTERNAL and should NOT be treated as external cash flows.
+ *
+ * Optional (NOT recommended for Model A): includeTrades=true
+ * - BUY: negative (as if investor paid out-of-pocket)
+ * - SELL: positive (as if investor received proceeds)
+ * This is only useful for alternate simplified models or if you are NOT modeling cash balances.
  */
 export function cashFlowsFromTransactions(
   txs: Transaction[],
@@ -31,25 +54,27 @@ export function cashFlowsFromTransactions(
   const includeTrades = !!opts?.includeTrades;
   const flows: CashFlow[] = [];
 
-  for (const t of txs) {
-    if (!t?.date) continue;
+  for (const t of txs ?? []) {
+    if (!t || !isISODate(t.date)) continue;
 
     if (t.type === "CASH_DEPOSIT") {
-      const amt = safe(t.amount ?? 0);
-      if (amt !== 0) flows.push({ date: t.date, amount: -Math.abs(amt) });
+      const amt = safe(Number(t.amount ?? 0));
+      const v = Math.abs(amt);
+      if (v > 0) flows.push({ date: t.date, amount: -v });
       continue;
     }
 
     if (t.type === "CASH_WITHDRAWAL") {
-      const amt = safe(t.amount ?? 0);
-      if (amt !== 0) flows.push({ date: t.date, amount: Math.abs(amt) });
+      const amt = safe(Number(t.amount ?? 0));
+      const v = Math.abs(amt);
+      if (v > 0) flows.push({ date: t.date, amount: +v });
       continue;
     }
 
+    // Model A: trades are internal. Only include if explicitly requested.
     if (includeTrades && (t.type === "BUY" || t.type === "SELL")) {
-      const qty = safe(t.quantity ?? 0);
-      const px = safe(t.price ?? 0);
-      // only count if we can compute a notional
+      const qty = safe(Number(t.quantity ?? 0));
+      const px = safe(Number(t.price ?? 0));
       if (qty > 0 && px > 0) {
         const notion = qty * px;
         flows.push({ date: t.date, amount: t.type === "BUY" ? -Math.abs(notion) : Math.abs(notion) });
@@ -57,13 +82,7 @@ export function cashFlowsFromTransactions(
     }
   }
 
-  // Combine same-day flows
-  const byDate = new Map<string, number>();
-  for (const f of flows) byDate.set(f.date, (byDate.get(f.date) ?? 0) + f.amount);
-
-  return Array.from(byDate.entries())
-    .map(([date, amount]) => ({ date, amount }))
-    .sort((a, b) => a.date.localeCompare(b.date));
+  return sumByDate(flows);
 }
 
 /**
@@ -72,13 +91,14 @@ export function cashFlowsFromTransactions(
  * Requires at least one negative and one positive cash flow.
  */
 export function xirr(cashFlows: CashFlow[], guess = 0.1): number | null {
-  if (cashFlows.length < 2) return null;
+  const flows = (cashFlows ?? []).slice().filter((f) => isISODate(f.date) && Number.isFinite(f.amount));
+  if (flows.length < 2) return null;
 
-  const hasNeg = cashFlows.some((f) => f.amount < 0);
-  const hasPos = cashFlows.some((f) => f.amount > 0);
+  const hasNeg = flows.some((f) => f.amount < 0);
+  const hasPos = flows.some((f) => f.amount > 0);
   if (!hasNeg || !hasPos) return null;
 
-  const flows = cashFlows.slice().sort((a, b) => a.date.localeCompare(b.date));
+  flows.sort((a, b) => a.date.localeCompare(b.date));
   const t0 = flows[0].date;
 
   // NPV(rate) = sum( cf / (1+rate)^(days/365) )
@@ -119,13 +139,11 @@ export function xirr(cashFlows: CashFlow[], guess = 0.1): number | null {
   }
 
   // 2) Bisection fallback (more robust)
-  // Find bracket [lo, hi] such that npv(lo) and npv(hi) have opposite signs
   let lo = -0.95;
   let hi = 10;
   let fLo = npv(lo);
   let fHi = npv(hi);
 
-  // If no sign change, try widening hi a bit
   if (Number.isFinite(fLo) && Number.isFinite(fHi) && fLo * fHi > 0) {
     hi = 50;
     fHi = npv(hi);
@@ -161,19 +179,31 @@ export function xirr(cashFlows: CashFlow[], guess = 0.1): number | null {
  * Returns cumulative TWR for the series (0.25 => +25%).
  *
  * Per day:
- * r_t = (V_t - CF_t)/V_{t-1} - 1
- * where CF_t is net external flow ADDED TO portfolio on day t.
+ * r_t = (V_t - CF_t) / V_{t-1} - 1
+ * where CF_t is net EXTERNAL flow ADDED TO the portfolio on day t.
  *
- * Our flows are investor-perspective:
- * deposits are negative, withdrawals positive, so we invert sign for portfolio CF.
+ * Our cashFlows are INVESTOR perspective:
+ * - deposits: negative
+ * - withdrawals: positive
+ *
+ * So to get CF added to portfolio:
+ *   CF_portfolio = -CF_investor
+ *
+ * ✅ Model A: cashFlows should come ONLY from deposits/withdrawals.
  */
 export function twr(series: ValuePoint[], cashFlows: CashFlow[]): number | null {
-  if (series.length < 2) return null;
+  const s = (series ?? [])
+    .slice()
+    .filter((p) => isISODate(p.date) && Number.isFinite(p.value))
+    .sort((a, b) => a.date.localeCompare(b.date));
 
-  const s = series.slice().sort((a, b) => a.date.localeCompare(b.date));
+  if (s.length < 2) return null;
 
   const flowByDate = new Map<string, number>();
-  for (const f of cashFlows) flowByDate.set(f.date, (flowByDate.get(f.date) ?? 0) + f.amount);
+  for (const f of cashFlows ?? []) {
+    if (!isISODate(f.date)) continue;
+    flowByDate.set(f.date, (flowByDate.get(f.date) ?? 0) + safe(f.amount));
+  }
 
   let growth = 1;
 
@@ -186,7 +216,7 @@ export function twr(series: ValuePoint[], cashFlows: CashFlow[]): number | null 
     const cfToPortfolio = -cfInvestor; // invert sign (investor -> portfolio)
 
     const r = (cur - cfToPortfolio) / prev - 1;
-    growth *= 1 + r;
+    if (Number.isFinite(r)) growth *= 1 + r;
   }
 
   return growth - 1;
@@ -195,14 +225,16 @@ export function twr(series: ValuePoint[], cashFlows: CashFlow[]): number | null 
 /**
  * Helper to build cash flows for XIRR:
  * (external flows + terminal value at end date)
+ *
+ * Terminal value is the final portfolio value from INVESTOR perspective (positive inflow).
  */
 export function xirrCashFlowsWithTerminalValue(
   cashFlows: CashFlow[],
   terminalDate: string,
   terminalValue: number,
 ): CashFlow[] {
-  const flows = cashFlows.slice();
-  flows.push({ date: terminalDate, amount: safe(terminalValue) });
+  const flows = (cashFlows ?? []).slice().filter((f) => isISODate(f.date));
+  if (isISODate(terminalDate)) flows.push({ date: terminalDate, amount: safe(terminalValue) });
   flows.sort((a, b) => a.date.localeCompare(b.date));
-  return flows;
+  return sumByDate(flows);
 }
