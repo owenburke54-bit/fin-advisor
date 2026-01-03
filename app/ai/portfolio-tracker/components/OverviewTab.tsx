@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/Button";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fetchPortfolioSeries } from "@/lib/portfolioHistory";
 import { fmtMoney, fmtNumber } from "@/lib/format";
+import { valueForPosition } from "@/lib/portfolioStorage";
 import {
   cashFlowsFromTransactions,
   twr,
@@ -103,7 +104,6 @@ async function fetchHistoryTicker(opts: {
     const payload = json?.data?.[key] ?? json?.data?.[ticker] ?? null;
 
     const points = (payload?.points ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
-
     return { points, error: payload?.error };
   } catch (e) {
     return { points: [], error: e instanceof Error ? e.message : "Fetch failed" };
@@ -145,12 +145,6 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
   );
 }
 
-/**
- * KPI Card:
- * - fixed internal structure so big numbers align
- * - one compact footer line
- * - consistent spacing/height/typography
- */
 function MetricCard(props: {
   title: string;
   value: React.ReactNode;
@@ -183,7 +177,6 @@ function MetricCard(props: {
   );
 }
 
-/** "Nice" Y-axis ticks (rounded numbers) */
 function niceTicks(
   min: number,
   max: number,
@@ -229,9 +222,6 @@ function isExternalCashTx(t: TxLike): boolean {
   return t?.type === "CASH_DEPOSIT" || t?.type === "CASH_WITHDRAWAL";
 }
 
-/**
- * Net contributions (display): deposits positive, withdrawals negative
- */
 function sumNetContributions(transactions: TxLike[], cutoffISO?: string, terminalISO?: string): number {
   const txs = Array.isArray(transactions) ? transactions : [];
   return txs
@@ -244,6 +234,10 @@ function sumNetContributions(transactions: TxLike[], cutoffISO?: string, termina
       if (!Number.isFinite(amt)) return acc;
       return acc + (t.type === "CASH_WITHDRAWAL" ? -Math.abs(amt) : Math.abs(amt));
     }, 0);
+}
+
+function isCashLike(assetClass?: string) {
+  return assetClass === "Money Market" || assetClass === "Cash";
 }
 
 export default function OverviewTab() {
@@ -350,19 +344,22 @@ export default function OverviewTab() {
     void runBench();
   }, [filteredHistorySeries, showBenchmark]);
 
-  const { kpis, chartData, yAxis, updates, killer } = useMemo(() => {
-    // ✅ IMPORTANT: totalValue should respect cash-like valuation rules.
-    // Using currentPrice for Money Market/Cash was causing incorrect totals.
-    const totalValue = state.positions.reduce((acc, p) => acc + valueForPosition(p as any), 0);
+  const { kpis, chartData, yAxis, updates, driver } = useMemo(() => {
+    // ✅ Total portfolio value (includes cash-like balances correctly)
+    const totalValue = (state.positions ?? []).reduce((acc, p) => acc + valueForPosition(p as any), 0);
 
-    // Cost should exclude cash-like balances (they aren't "invested cost").
-    const totalCost = state.positions.reduce((acc, p) => {
-      const isCashLike = p.assetClass === "Money Market" || p.assetClass === "Cash";
-      if (isCashLike) return acc;
-      return acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0);
-    }, 0);
+    // ✅ Split cash-like vs invested so Unrealized P/L is correct + intuitive
+    const cashValue = (state.positions ?? [])
+      .filter((p) => isCashLike(p.assetClass))
+      .reduce((acc, p) => acc + valueForPosition(p as any), 0);
 
-    const unrealized = totalValue - totalCost;
+    const investedValue = totalValue - cashValue;
+
+    const investedCost = (state.positions ?? [])
+      .filter((p) => !isCashLike(p.assetClass))
+      .reduce((acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0), 0);
+
+    const unrealized = investedValue - investedCost;
 
     const fullBaseline = historySeries.length ? historySeries[0].value : 0;
     const fullLast = historySeries.length ? historySeries.at(-1)!.value : 0;
@@ -371,9 +368,7 @@ export default function OverviewTab() {
 
     const periodChange =
       historySeries.length >= 2
-        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) /
-            Math.max(historySeries.at(-2)!.value, 1)) *
-          100
+        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) / Math.max(historySeries.at(-2)!.value, 1)) * 100
         : 0;
 
     const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
@@ -472,14 +467,17 @@ export default function OverviewTab() {
               : []),
           ];
 
-    const killer = (() => {
-      if (!state.positions.length) return null;
+    // ✅ Primary Driver (exclude cash-like)
+    const driver = (() => {
+      const nonCash = (state.positions ?? []).filter((p) => !isCashLike(p.assetClass));
+      if (!nonCash.length) return null;
 
-      const rows = state.positions
-        .filter((p) => p.assetClass !== "Money Market" && p.assetClass !== "Cash") // exclude balances
+      const rows = nonCash
         .map((p) => {
           const current =
-            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
+            typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
+              ? p.currentPrice
+              : p.costBasisPerUnit;
           const cost = Number(p.costBasisPerUnit) || 0;
           const qty = Number(p.quantity) || 0;
           const pnl = (current - cost) * qty;
@@ -491,12 +489,8 @@ export default function OverviewTab() {
 
       rows.sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
       const top = rows[0];
-
       return { ticker: top.ticker, pnl: top.pnl, dir: top.pnl >= 0 ? "gains" : "losses" };
     })();
-
-    const hasAnyTx = Array.isArray(state.transactions) && state.transactions.length > 0;
-    const hasAnyFlow = flowsAll.some((f) => Number(f?.amount) !== 0);
 
     const portSeriesForRisk = aligned.map((p) => ({ date: p.d, value: p.totalDollar }));
     const portR = dailyReturns(portSeriesForRisk).map((x) => x.r);
@@ -523,8 +517,11 @@ export default function OverviewTab() {
     return {
       kpis: {
         totalValue,
-        totalCost,
+        cashValue,
+        investedValue,
+        investedCost,
         unrealized,
+
         dayChange: periodChange,
         sinceStartDollar,
         sinceStartPercent,
@@ -532,8 +529,6 @@ export default function OverviewTab() {
         twr: twrValue,
         xirr: typeof xirrValue === "number" && Number.isFinite(xirrValue) ? xirrValue : null,
         netContrib,
-        hasTx: hasAnyTx,
-        hasFlows: hasAnyFlow,
 
         tfStartValue,
         tfEndValue,
@@ -548,7 +543,7 @@ export default function OverviewTab() {
       chartData: aligned,
       yAxis: { ticks, domain },
       updates,
-      killer,
+      driver,
     };
   }, [
     state.positions,
@@ -581,8 +576,18 @@ export default function OverviewTab() {
 
   return (
     <div className="space-y-4">
+      {/* KPIs */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        <MetricCard title="Total Value" value={fmtMoney(kpis.totalValue)} />
+        <MetricCard
+          title="Total Value"
+          value={fmtMoney(kpis.totalValue)}
+          footnote={
+            <>
+              <span className="text-gray-500">Cash/MM</span>
+              <span className="font-medium text-gray-700 tabular-nums">{fmtMoney(kpis.cashValue ?? 0)}</span>
+            </>
+          }
+        />
 
         <MetricCard
           title="Unrealized P/L"
@@ -595,8 +600,8 @@ export default function OverviewTab() {
           tone={unrealTone}
           footnote={
             <>
-              <span className="text-gray-500">Cost</span>
-              <span className="font-medium text-gray-700 tabular-nums">{fmtMoney(kpis.totalCost ?? 0)}</span>
+              <span className="text-gray-500">Invested cost</span>
+              <span className="font-medium text-gray-700 tabular-nums">{fmtMoney(kpis.investedCost ?? 0)}</span>
             </>
           }
         />
@@ -704,7 +709,6 @@ export default function OverviewTab() {
                 </div>
               </div>
 
-              {/* bar */}
               <div className="mt-4">
                 <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100 border">
                   <div className="h-full flex">
@@ -723,15 +727,11 @@ export default function OverviewTab() {
 
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
                   <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`}
-                    />
+                    <span className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`} />
                     <span className="tabular-nums">Contrib ({fmtNumber(contribPct, 0)}%)</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`}
-                    />
+                    <span className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`} />
                     <span className="tabular-nums">Growth ({fmtNumber(growthPct, 0)}%)</span>
                   </div>
                 </div>
@@ -780,7 +780,7 @@ export default function OverviewTab() {
         </div>
       </div>
 
-      {/* Trend chart (clipping fixed) */}
+      {/* Trend chart */}
       <Card>
         <CardContent className="h-[280px] pt-6">
           {historyError ? (
@@ -790,104 +790,127 @@ export default function OverviewTab() {
           ) : chartData.length < 2 ? (
             <p className="text-sm text-gray-600">Add positions (with purchase dates) to see historical trend.</p>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 8, right: 18, left: 18, bottom: 8 }}>
-                <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.25} />
-                <XAxis
-                  dataKey="d"
-                  tickMargin={8}
-                  minTickGap={28}
-                  tickFormatter={formatAxisDate}
-                  tickLine={false}
-                  axisLine={false}
-                />
-                <YAxis
-                  width={92}
-                  domain={yAxis.domain}
-                  ticks={yAxis.ticks}
-                  tickFormatter={(v: number) => (mode === "dollar" ? fmtMoney(v) : `${fmtNumber(v, 1)}%`)}
-                  tickLine={false}
-                  axisLine={false}
-                />
+            <>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData} margin={{ top: 8, right: 18, left: 18, bottom: 8 }}>
+                  <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.25} />
+                  <XAxis
+                    dataKey="d"
+                    tickMargin={8}
+                    minTickGap={28}
+                    tickFormatter={formatAxisDate}
+                    tickLine={false}
+                    axisLine={false}
+                  />
+                  <YAxis
+                    width={92}
+                    domain={yAxis.domain}
+                    ticks={yAxis.ticks}
+                    tickFormatter={(v: number) => (mode === "dollar" ? fmtMoney(v) : `${fmtNumber(v, 1)}%`)}
+                    tickLine={false}
+                    axisLine={false}
+                  />
 
-                <ReTooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null;
+                  <ReTooltip
+                    content={({ active, payload }) => {
+                      if (!active || !payload?.length) return null;
 
-                    const point = payload[0].payload as {
-                      d: string;
-                      v: number;
-                      b: number | null;
-                      breakdown: Record<string, number>;
-                      totalDollar: number;
-                      benchDollar: number | null;
-                      benchPct: number | null;
-                    };
+                      const point = payload[0].payload as {
+                        d: string;
+                        v: number;
+                        b: number | null;
+                        breakdown: Record<string, number>;
+                        totalDollar: number;
+                        benchDollar: number | null;
+                        benchPct: number | null;
+                      };
 
-                    const entries = Object.entries(point.breakdown || {});
-                    entries.sort((a, b) => b[1] - a[1]);
+                      const entries = Object.entries(point.breakdown || {});
+                      entries.sort((a, b) => b[1] - a[1]);
 
-                    return (
-                      <div className="rounded-xl border bg-white p-3 text-sm shadow-lg">
-                        <div className="font-medium mb-2">{formatTooltipDate(point.d)}</div>
+                      return (
+                        <div className="rounded-xl border bg-white p-3 text-sm shadow-lg">
+                          <div className="font-medium mb-2">{formatTooltipDate(point.d)}</div>
 
-                        <div className="space-y-1 mb-2">
-                          <div className="flex justify-between gap-6">
-                            <span className="text-gray-600">Portfolio</span>
-                            <span className="font-semibold tabular-nums">
-                              {mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}
-                            </span>
+                          <div className="space-y-1 mb-2">
+                            <div className="flex justify-between gap-6">
+                              <span className="text-gray-600">Portfolio</span>
+                              <span className="font-semibold tabular-nums">
+                                {mode === "dollar" ? fmtMoney(point.totalDollar) : `${fmtNumber(point.v, 2)}%`}
+                              </span>
+                            </div>
+
+                            {showBenchmark && point.b !== null && (
+                              <div className="flex justify-between gap-6">
+                                <span className="text-gray-600">S&amp;P 500 (SPY)</span>
+                                <span className="font-semibold tabular-nums">
+                                  {mode === "dollar"
+                                    ? fmtMoney(point.benchDollar ?? 0)
+                                    : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
+                                </span>
+                              </div>
+                            )}
                           </div>
 
-                          {showBenchmark && point.b !== null && (
-                            <div className="flex justify-between gap-6">
-                              <span className="text-gray-600">S&amp;P 500 (SPY)</span>
-                              <span className="font-semibold tabular-nums">
-                                {mode === "dollar"
-                                  ? fmtMoney(point.benchDollar ?? 0)
-                                  : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
-                              </span>
+                          {mode === "dollar" && entries.length > 0 && (
+                            <div className="pt-2 border-t space-y-1">
+                              {entries.map(([k, v]) => (
+                                <div key={k} className="flex justify-between gap-6">
+                                  <span className="text-gray-600">{k}</span>
+                                  <span className="font-mono tabular-nums">{fmtMoney(v, 0)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {mode === "percent" && (
+                            <div className="pt-2 border-t text-xs text-gray-500">
+                              Tip: switch to <span className="font-medium">$</span> to see ticker breakdown.
                             </div>
                           )}
                         </div>
-
-                        {mode === "dollar" && entries.length > 0 && (
-                          <div className="pt-2 border-t space-y-1">
-                            {entries.map(([k, v]) => (
-                              <div key={k} className="flex justify-between gap-6">
-                                <span className="text-gray-600">{k}</span>
-                                <span className="font-mono tabular-nums">{fmtMoney(v, 0)}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        {mode === "percent" && (
-                          <div className="pt-2 border-t text-xs text-gray-500">
-                            Tip: switch to <span className="font-medium">$</span> to see ticker breakdown.
-                          </div>
-                        )}
-                      </div>
-                    );
-                  }}
-                />
-
-                {/* ✅ Do not hardcode chart colors */}
-                <Line type="monotone" dataKey="v" strokeWidth={2.5} dot={false} />
-
-                {showBenchmark && (
-                  <Line
-                    type="monotone"
-                    dataKey="b"
-                    strokeWidth={2}
-                    strokeDasharray="6 6"
-                    dot={false}
-                    isAnimationActive={false}
-                    connectNulls
+                      );
+                    }}
                   />
+
+                  {/* ✅ Restored your preferred scheme: Portfolio = solid blue, Benchmark = dashed dark */}
+                  <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+
+                  {showBenchmark && (
+                    <Line
+                      type="monotone"
+                      dataKey="b"
+                      stroke="#111827"
+                      strokeWidth={2}
+                      strokeDasharray="6 6"
+                      dot={false}
+                      isAnimationActive={false}
+                      connectNulls
+                    />
+                  )}
+                </LineChart>
+              </ResponsiveContainer>
+
+              {/* ✅ Small key / legend for solid vs dashed */}
+              <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-gray-600">
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-[2px] w-7 rounded bg-[#2563eb]" />
+                  <span>Portfolio</span>
+                </div>
+                {showBenchmark && (
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="inline-block h-[2px] w-7 rounded"
+                      style={{
+                        backgroundImage:
+                          "repeating-linear-gradient(to right, #111827 0, #111827 6px, transparent 6px, transparent 10px)",
+                      }}
+                    />
+                    <span>S&amp;P 500 (SPY)</span>
+                  </div>
                 )}
-              </LineChart>
-            </ResponsiveContainer>
+              </div>
+            </>
           )}
 
           {showBenchmark && benchLoading && <p className="mt-2 text-xs text-gray-500">Loading benchmark (SPY)…</p>}
@@ -897,22 +920,23 @@ export default function OverviewTab() {
         </CardContent>
       </Card>
 
+      {/* Primary Driver (renamed from "Killer Insight") */}
       <Card>
         <CardContent className="p-5">
-          <div className="text-sm font-medium text-gray-600">Killer Insight</div>
+          <div className="text-sm font-medium text-gray-600">Primary Driver</div>
 
-          {killer ? (
+          {driver ? (
             <div className="mt-2 text-sm text-gray-900">
-              <span className="font-semibold">{killer.ticker}</span> is your biggest driver of {killer.dir} right now (
-              <span className={killer.pnl >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
-                {killer.pnl >= 0 ? "+" : ""}
-                {fmtMoney(killer.pnl)}
+              <span className="font-semibold">{driver.ticker}</span> is contributing the largest share of your{" "}
+              {driver.dir} right now{" "}
+              <span className={driver.pnl >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
+                ({driver.pnl >= 0 ? "+" : ""}
+                {fmtMoney(driver.pnl)})
               </span>
-              ).{" "}
-              <span className="text-gray-600">If you want a smoother ride, reduce single-name concentration over time.</span>
+              . <span className="text-gray-600">If you want to reduce volatility, lower single-name concentration over time.</span>
             </div>
           ) : (
-            <div className="mt-2 text-sm text-gray-600">Add positions to see your biggest return driver.</div>
+            <div className="mt-2 text-sm text-gray-600">Add positions to see your primary return driver.</div>
           )}
         </CardContent>
       </Card>
@@ -938,9 +962,3 @@ export default function OverviewTab() {
     </div>
   );
 }
-
-/**
- * Local import to avoid circulars.
- * If you already import valueForPosition at the top elsewhere, remove this.
- */
-import { valueForPosition } from "@/lib/portfolioStorage";

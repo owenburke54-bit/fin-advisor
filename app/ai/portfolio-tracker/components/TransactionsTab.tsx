@@ -34,16 +34,14 @@ function makeId() {
 }
 
 /**
- * Rebuild positions from transaction history (source of truth).
- * - Aggregates by (accountType, ticker)
- * - BUY increases qty, updates weighted avg cost basis
- * - SELL decreases qty, keeps cost basis (no realized P/L tracking yet)
- * - Keeps metadata from existing positions when possible (assetClass/name/sector/currentPrice/purchaseDate)
+ * Rebuild positions from transaction history (TRADES ONLY), but:
+ * ✅ Keep all existing positions that are NOT affected by trade keys
+ * ✅ Only replace positions for (accountType,ticker) pairs that appear in trades
  */
 function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transaction[]): Position[] {
   const seedByKey = new Map<string, Position>();
   for (const p of seedPositions ?? []) {
-    const key = `${p.accountType || "Taxable"}::${(p.ticker || "").toUpperCase().trim()}`;
+    const key = `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
     if (!seedByKey.has(key)) seedByKey.set(key, p);
   }
 
@@ -56,8 +54,8 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   };
 
   const agg = new Map<string, Agg>();
+  const tradeKeys = new Set<string>();
 
-  // process in chronological order for correct avg cost / earliest date
   const ordered = (txs ?? [])
     .slice()
     .filter((t) => t && t.date)
@@ -73,14 +71,15 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     if (!ticker || !Number.isFinite(qty) || qty <= 0) continue;
 
     const key = `${acct}::${ticker}`;
-    const cur = agg.get(key) ?? { accountType: acct, ticker, qty: 0, cost: 0, earliestDate: undefined };
+    tradeKeys.add(key);
 
+    const cur = agg.get(key) ?? { accountType: acct, ticker, qty: 0, cost: 0, earliestDate: undefined };
     if (!cur.earliestDate || t.date < cur.earliestDate) cur.earliestDate = t.date;
 
     if (t.type === "BUY") {
       const px = Number(t.price ?? NaN);
 
-      // If no price, fallback to seed cost basis if we have it; otherwise ignore this BUY
+      // fallback: if user left price blank, try seed cost basis
       const fallbackSeed = seedByKey.get(key);
       const pxToUse =
         Number.isFinite(px) && px > 0
@@ -104,20 +103,20 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
 
     if (t.type === "SELL") {
       cur.qty = Math.max(0, cur.qty - qty);
-      // cost stays the same for now
       agg.set(key, cur);
     }
   }
 
-  const out: Position[] = [];
-
+  // Build updated positions for traded keys
+  const rebuilt: Position[] = [];
   for (const [key, a] of agg.entries()) {
+    // if qty is now 0, we consider the position closed
     if (a.qty <= 0) continue;
 
     const seed = seedByKey.get(key);
     const assetClass: AssetClass = (seed?.assetClass ?? "Equity") as AssetClass;
 
-    out.push({
+    rebuilt.push({
       id: seed?.id ?? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : key),
       ticker: a.ticker,
       name: seed?.name ?? a.ticker,
@@ -133,17 +132,23 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     });
   }
 
+  // ✅ Keep all seed positions NOT touched by trades
+  const kept = (seedPositions ?? []).filter((p) => {
+    const key = `${(p.accountType || "Taxable")}::${(p.ticker || "").toUpperCase().trim()}`;
+    return !tradeKeys.has(key);
+  });
+
+  const out = [...kept, ...rebuilt];
+
+  // deterministic ordering
   out.sort((p1, p2) => (p1.accountType + p1.ticker).localeCompare(p2.accountType + p2.ticker));
   return out;
 }
 
 export default function TransactionsTab() {
-  // ✅ IMPORTANT: setTransactions/setPositions now support opts { snapshot?: boolean }
-  // We snapshot once (on transactions) and avoid double-snapshotting on positions.
-  const { state, setTransactions, setPositions } = usePortfolioState();
+  const { state, setTransactions, setPositions, refreshPrices } = usePortfolioState();
   const [open, setOpen] = useState(false);
 
-  // form state
   const [type, setType] = useState<TxType>("BUY");
   const [date, setDate] = useState(todayISO());
   const [ticker, setTicker] = useState("");
@@ -156,16 +161,28 @@ export default function TransactionsTab() {
     return (state.transactions ?? []).slice().sort((a, b) => (a.date < b.date ? 1 : -1));
   }, [state.transactions]);
 
+  // ✅ Summary: show cash flows + trade notional (so this page never looks "broken")
   const summary = useMemo(() => {
     let deposits = 0;
     let withdrawals = 0;
+    let buyNotional = 0;
+    let sellNotional = 0;
 
     for (const t of state.transactions ?? []) {
-      if (t.type === "CASH_DEPOSIT") deposits += Number(t.amount || 0);
-      if (t.type === "CASH_WITHDRAWAL") withdrawals += Number(t.amount || 0);
+      if (t.type === "CASH_DEPOSIT") deposits += Math.abs(Number(t.amount || 0));
+      if (t.type === "CASH_WITHDRAWAL") withdrawals += Math.abs(Number(t.amount || 0));
+
+      if (t.type === "BUY" && t.price && t.quantity) buyNotional += t.price * t.quantity;
+      if (t.type === "SELL" && t.price && t.quantity) sellNotional += t.price * t.quantity;
     }
 
-    return { deposits, withdrawals, net: deposits - withdrawals };
+    return {
+      deposits,
+      withdrawals,
+      net: deposits - withdrawals,
+      buyNotional,
+      sellNotional,
+    };
   }, [state.transactions]);
 
   function resetForm() {
@@ -178,15 +195,19 @@ export default function TransactionsTab() {
     setAccountType("Taxable");
   }
 
-  function addTx() {
+  async function syncAfterTx(nextTxs: Transaction[]) {
+    // ✅ rebuild without nuking the rest of the portfolio
+    const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
+    setPositions(nextPositions);
+
+    // ✅ refresh prices so Overview/Allocation update immediately
+    await refreshPrices(nextPositions);
+  }
+
+  async function addTx() {
     if (!date) return;
 
-    const tx: Transaction = {
-      id: makeId(),
-      type,
-      date,
-      accountType,
-    };
+    const tx: Transaction = { id: makeId(), type, date, accountType };
 
     if (isTrade(type)) {
       const qty = Number(quantity);
@@ -205,41 +226,28 @@ export default function TransactionsTab() {
     }
 
     const nextTxs = [tx, ...(state.transactions ?? [])];
-
-    // ✅ snapshot ONCE (transactions)
-    setTransactions(nextTxs, { snapshot: true });
-
-    // ✅ rebuild positions so every tab updates immediately, but DON'T snapshot again
-    const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
-    setPositions(nextPositions, { snapshot: false });
+    setTransactions(nextTxs);
+    await syncAfterTx(nextTxs);
 
     resetForm();
     setOpen(false);
   }
 
-  function removeTx(id: string) {
+  async function removeTx(id: string) {
     const nextTxs = (state.transactions ?? []).filter((t) => t.id !== id);
-
-    // ✅ snapshot ONCE (transactions)
-    setTransactions(nextTxs, { snapshot: true });
-
-    // ✅ rebuild after delete too (no snapshot)
-    const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
-    setPositions(nextPositions, { snapshot: false });
+    setTransactions(nextTxs);
+    await syncAfterTx(nextTxs);
   }
 
   function describeTx(t: Transaction) {
     if (isTrade(t.type)) {
       const notional = t.price && t.quantity ? t.price * t.quantity : null;
-
       return `${t.type === "BUY" ? "Buy" : "Sell"} ${t.quantity}${
-        t.price ? ` @ ${fmtMoney(t.price, 2)}` : ""
-      }${notional ? ` • ${fmtMoney(notional, 2)}` : ""}`;
+        t.price ? ` @ ${fmtMoney(t.price)}` : ""
+      }${notional ? ` • ${fmtMoney(notional)}` : ""}`;
     }
 
-    return t.type === "CASH_DEPOSIT"
-      ? `+ ${fmtMoney(Number(t.amount), 2)}`
-      : `- ${fmtMoney(Number(t.amount), 2)}`;
+    return t.type === "CASH_DEPOSIT" ? `+ ${fmtMoney(Number(t.amount))}` : `- ${fmtMoney(Number(t.amount))}`;
   }
 
   return (
@@ -249,18 +257,27 @@ export default function TransactionsTab() {
           <CardTitle>Transactions</CardTitle>
           <Button onClick={() => setOpen(true)}>Add transaction</Button>
         </CardHeader>
-        <CardContent className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+
+        <CardContent className="grid grid-cols-1 sm:grid-cols-5 gap-3 text-sm">
           <div className="border rounded p-3">
             <div className="text-gray-500">Deposits</div>
-            <div className="font-semibold">{fmtMoney(summary.deposits, 2)}</div>
+            <div className="font-semibold">{fmtMoney(summary.deposits)}</div>
           </div>
           <div className="border rounded p-3">
             <div className="text-gray-500">Withdrawals</div>
-            <div className="font-semibold">{fmtMoney(summary.withdrawals, 2)}</div>
+            <div className="font-semibold">{fmtMoney(summary.withdrawals)}</div>
           </div>
           <div className="border rounded p-3">
             <div className="text-gray-500">Net flow</div>
-            <div className="font-semibold">{fmtMoney(summary.net, 2)}</div>
+            <div className="font-semibold">{fmtMoney(summary.net)}</div>
+          </div>
+          <div className="border rounded p-3">
+            <div className="text-gray-500">Buys</div>
+            <div className="font-semibold">{fmtMoney(summary.buyNotional)}</div>
+          </div>
+          <div className="border rounded p-3">
+            <div className="text-gray-500">Sells</div>
+            <div className="font-semibold">{fmtMoney(summary.sellNotional)}</div>
           </div>
         </CardContent>
       </Card>

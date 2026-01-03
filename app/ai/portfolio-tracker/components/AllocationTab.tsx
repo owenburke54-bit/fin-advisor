@@ -1,10 +1,10 @@
 "use client";
 
+import { useMemo, useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/Card";
 import { Progress } from "@/components/ui/Progress";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { valueForPosition } from "@/lib/portfolioStorage";
-import { useMemo, useEffect, useState } from "react";
 import {
   ResponsiveContainer,
   PieChart,
@@ -20,8 +20,8 @@ import {
 
 /**
  * ✅ NOTE:
- * - Do NOT specify colors per our project style rule.
  * - Keep visuals clean, stable, and mobile-friendly.
+ * - AllocationTab does NOT hardcode chart colors.
  */
 
 const moneyFmt0 = new Intl.NumberFormat(undefined, {
@@ -82,13 +82,7 @@ export default function AllocationTab() {
   const { state, diversificationScore, diversificationDetails, topConcentrations } = usePortfolioState();
   const isMobile = useMediaQuery("(max-width: 640px)");
 
-  const {
-    assetData,
-    accountData,
-    total,
-    stackedAccountRows,
-    assetKeys,
-  } = useMemo(() => {
+  const { assetData, accountData, total, stackedAccountRows, assetKeys } = useMemo(() => {
     const byAsset = new Map<string, number>();
     const byAccount = new Map<string, number>();
     const byAccountAsset = new Map<string, Map<string, number>>();
@@ -123,7 +117,7 @@ export default function AllocationTab() {
       }))
       .sort((a, b) => b.value - a.value);
 
-    // stable ordering for stacked bars + legend
+    // stable ordering for stacks + legend
     const assetKeys = assetData.map((d) => d.name);
 
     const stackedAccountRows = accountData.map((acc) => {
@@ -168,13 +162,13 @@ export default function AllocationTab() {
                         label={false}
                         isAnimationActive={false}
                       >
-                        {/* ✅ no explicit fill colors; let recharts assign defaults */}
+                        {/* no explicit fill colors */}
                         {assetData.map((d) => (
                           <Cell key={d.name} />
                         ))}
                       </Pie>
 
-                      {/* Center label (no fragile Label hacks) */}
+                      {/* Center label */}
                       <text
                         x="50%"
                         y="47%"
@@ -223,11 +217,10 @@ export default function AllocationTab() {
                   </ResponsiveContainer>
                 </div>
 
-                {/* Custom legend: no color dependency */}
+                {/* Custom legend (neutral) */}
                 <div className={`mt-4 grid ${isMobile ? "grid-cols-2" : "grid-cols-3"} gap-x-5 gap-y-3`}>
                   {assetData.map((d) => (
                     <div key={d.name} className="flex items-start gap-2">
-                      {/* neutral dot (not tied to chart color) */}
                       <span className="mt-1.5 h-2.5 w-2.5 rounded-full shrink-0 bg-gray-300" />
                       <div className="min-w-0 w-full">
                         <div className="flex items-baseline justify-between gap-2">
@@ -298,11 +291,11 @@ export default function AllocationTab() {
                             <div className="rounded-xl border bg-white p-3 text-sm shadow-lg min-w-[230px]">
                               <div className="font-semibold text-gray-900 mb-1">{label}</div>
                               <div className="text-xs text-gray-600 mb-2">Total: {fmtDollar(totalForAcct)}</div>
+
                               <div className="space-y-1">
                                 {rows.map((r: any) => (
                                   <div key={r.dataKey} className="flex items-center justify-between gap-4">
                                     <div className="flex items-center gap-2 min-w-0">
-                                      {/* keep simple; don't bind to chart color */}
                                       <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
                                       <span className="text-gray-700 truncate">{shortAssetName(String(r.dataKey))}</span>
                                     </div>
@@ -317,10 +310,10 @@ export default function AllocationTab() {
                         }}
                       />
 
-                      {/* Invisible total for tooltip */}
+                      {/* invisible total for tooltip */}
                       <Bar dataKey="total" fill="transparent" stackId="__total" />
 
-                      {/* ✅ no explicit fill colors */}
+                      {/* no explicit fill colors */}
                       {assetKeys.map((k) => (
                         <Bar key={k} dataKey={k} stackId="acct" isAnimationActive={false} />
                       ))}
@@ -328,7 +321,7 @@ export default function AllocationTab() {
                   </ResponsiveContainer>
                 </div>
 
-                {/* Legend: neutral */}
+                {/* Legend (neutral) */}
                 <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-700">
                   {assetKeys.map((k) => (
                     <div key={k} className="flex items-center gap-2">
@@ -338,17 +331,31 @@ export default function AllocationTab() {
                   ))}
                 </div>
 
-                {/* Summary chips */}
-                <div className={`mt-3 grid ${isMobile ? "grid-cols-1" : "grid-cols-2"} gap-2`}>
-                  {stackedAccountRows.map((r) => (
-                    <div key={r.name} className="rounded-xl border bg-white px-3 py-2 flex items-center justify-between">
-                      <div className="text-sm font-medium text-gray-800">{r.name}</div>
-                      <div className="text-sm text-gray-900 font-semibold tabular-nums">
-                        {fmtDollar(r.total)}{" "}
-                        <span className="text-gray-500 font-normal">({fmtPct(r.total / Math.max(total, 1))})</span>
-                      </div>
-                    </div>
-                  ))}
+                {/* ✅ Replaces the old “bubbles” with a clean mini-table */}
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-gray-500 border-b">
+                      <tr>
+                        <th className="py-2 text-left">Account</th>
+                        <th className="py-2 text-right">Weight</th>
+                        <th className="py-2 text-right">Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {accountData.map((a) => (
+                        <tr key={a.name} className="border-b last:border-0">
+                          <td className="py-2 font-medium text-gray-900">{a.name}</td>
+                          <td className="py-2 text-right tabular-nums">{fmtPct(a.percent)}</td>
+                          <td className="py-2 text-right tabular-nums">{fmtDollar(a.value)}</td>
+                        </tr>
+                      ))}
+                      <tr>
+                        <td className="py-2 font-semibold">Total</td>
+                        <td className="py-2" />
+                        <td className="py-2 text-right font-semibold tabular-nums">{fmtDollar(total)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             )}
@@ -378,28 +385,28 @@ export default function AllocationTab() {
                 <div className="text-xs text-gray-600">Top holding</div>
                 <div className="mt-1 text-sm font-semibold text-gray-900">
                   {diversificationDetails.topHoldingTicker ?? "—"} ·{" "}
-                  {Math.round(diversificationDetails.topHoldingPct * 100)}%
+                  {Math.round((diversificationDetails.topHoldingPct ?? 0) * 100)}%
                 </div>
               </div>
 
               <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Top 3 holdings</div>
                 <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {Math.round(diversificationDetails.top3Pct * 100)}%
+                  {Math.round((diversificationDetails.top3Pct ?? 0) * 100)}%
                 </div>
               </div>
 
               <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Equity</div>
                 <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {Math.round(diversificationDetails.buckets.equity * 100)}%
+                  {Math.round((diversificationDetails.buckets?.equity ?? 0) * 100)}%
                 </div>
               </div>
 
               <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Cash/MM</div>
                 <div className="mt-1 text-sm font-semibold text-gray-900">
-                  {Math.round(diversificationDetails.buckets.cash * 100)}%
+                  {Math.round((diversificationDetails.buckets?.cash ?? 0) * 100)}%
                 </div>
               </div>
             </div>
@@ -428,7 +435,7 @@ export default function AllocationTab() {
         </CardContent>
       </Card>
 
-      {/* Optional: Quick table (helps when charts are hard to read on mobile) */}
+      {/* Allocation Table */}
       <Card>
         <CardHeader>
           <CardTitle>Allocation Table</CardTitle>
