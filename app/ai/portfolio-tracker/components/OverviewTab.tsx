@@ -102,9 +102,7 @@ async function fetchHistoryTicker(opts: {
     const key = (json?.tickers?.[0] ?? ticker).toUpperCase();
     const payload = json?.data?.[key] ?? json?.data?.[ticker] ?? null;
 
-    const points = (payload?.points ?? [])
-      .slice()
-      .sort((a, b) => a.date.localeCompare(b.date));
+    const points = (payload?.points ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
 
     return { points, error: payload?.error };
   } catch (e) {
@@ -148,15 +146,15 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
 }
 
 /**
- * KPI Card (makeover):
- * - fixed internal structure so all big numbers sit on the same baseline across the grid
- * - one compact footer line only (optional)
- * - consistent spacing, height, and typography across cards
+ * KPI Card:
+ * - fixed internal structure so big numbers align
+ * - one compact footer line
+ * - consistent spacing/height/typography
  */
 function MetricCard(props: {
   title: string;
   value: React.ReactNode;
-  footnote?: React.ReactNode; // single compact line
+  footnote?: React.ReactNode;
   tone?: "default" | "pos" | "neg";
 }) {
   const { title, value, footnote, tone = "default" } = props;
@@ -169,7 +167,6 @@ function MetricCard(props: {
       <CardContent className="p-6 flex flex-col h-full">
         <div className="text-sm font-medium text-gray-600">{title}</div>
 
-        {/* fixed min-height so BIG numbers align */}
         <div className="mt-4 min-h-[48px] flex items-end">
           <div className={`text-4xl font-semibold tracking-tight leading-none tabular-nums ${toneClass}`}>
             {value}
@@ -233,7 +230,7 @@ function isExternalCashTx(t: TxLike): boolean {
 }
 
 /**
- * Net contributions (for display): deposits positive, withdrawals negative
+ * Net contributions (display): deposits positive, withdrawals negative
  */
 function sumNetContributions(transactions: TxLike[], cutoffISO?: string, terminalISO?: string): number {
   const txs = Array.isArray(transactions) ? transactions : [];
@@ -353,17 +350,17 @@ export default function OverviewTab() {
     void runBench();
   }, [filteredHistorySeries, showBenchmark]);
 
-  const { kpis, chartData, yAxis, updates, killer, periodLabel } = useMemo(() => {
-    const totalValue = state.positions.reduce((acc, p) => {
-      const unit =
-        typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
-      return acc + (Number(p.quantity) || 0) * (Number(unit) || 0);
-    }, 0);
+  const { kpis, chartData, yAxis, updates, killer } = useMemo(() => {
+    // ✅ IMPORTANT: totalValue should respect cash-like valuation rules.
+    // Using currentPrice for Money Market/Cash was causing incorrect totals.
+    const totalValue = state.positions.reduce((acc, p) => acc + valueForPosition(p as any), 0);
 
-    const totalCost = state.positions.reduce(
-      (acc, p) => acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0),
-      0
-    );
+    // Cost should exclude cash-like balances (they aren't "invested cost").
+    const totalCost = state.positions.reduce((acc, p) => {
+      const isCashLike = p.assetClass === "Money Market" || p.assetClass === "Cash";
+      if (isCashLike) return acc;
+      return acc + (Number(p.quantity) || 0) * (Number(p.costBasisPerUnit) || 0);
+    }, 0);
 
     const unrealized = totalValue - totalCost;
 
@@ -374,10 +371,10 @@ export default function OverviewTab() {
 
     const periodChange =
       historySeries.length >= 2
-        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) / Math.max(historySeries.at(-2)!.value, 1)) * 100
+        ? ((historySeries.at(-1)!.value - historySeries.at(-2)!.value) /
+            Math.max(historySeries.at(-2)!.value, 1)) *
+          100
         : 0;
-
-    const periodLabel = "1-Day Change";
 
     const chartBaseline = filteredHistorySeries.length ? filteredHistorySeries[0].value : 0;
 
@@ -479,6 +476,7 @@ export default function OverviewTab() {
       if (!state.positions.length) return null;
 
       const rows = state.positions
+        .filter((p) => p.assetClass !== "Money Market" && p.assetClass !== "Cash") // exclude balances
         .map((p) => {
           const current =
             typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice) ? p.currentPrice : p.costBasisPerUnit;
@@ -551,7 +549,6 @@ export default function OverviewTab() {
       yAxis: { ticks, domain },
       updates,
       killer,
-      periodLabel,
     };
   }, [
     state.positions,
@@ -584,7 +581,6 @@ export default function OverviewTab() {
 
   return (
     <div className="space-y-4">
-      {/* Even layout: 6 cards => 2 rows of 3 on desktop (clean + aligned) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <MetricCard title="Total Value" value={fmtMoney(kpis.totalValue)} />
 
@@ -673,7 +669,6 @@ export default function OverviewTab() {
               <div className="mt-1 text-xs text-gray-500">Timeframe: {tfLabel}</div>
             </div>
 
-            {/* ✅ Removed Start/End (they were inaccurate) */}
             <div className="text-xs text-gray-500 text-right">
               As of <span className="font-medium text-gray-700">{new Date().toLocaleDateString()}</span>
             </div>
@@ -686,7 +681,11 @@ export default function OverviewTab() {
               <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-medium text-gray-500">Net contributions</div>
-                  <div className={`mt-1 text-xl font-semibold tabular-nums ${contribIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                  <div
+                    className={`mt-1 text-xl font-semibold tabular-nums ${
+                      contribIsPos ? "text-emerald-700" : "text-red-700"
+                    }`}
+                  >
                     {kpis.netContrib >= 0 ? "+" : ""}
                     {fmtMoney(kpis.netContrib ?? 0)}
                   </div>
@@ -694,14 +693,18 @@ export default function OverviewTab() {
 
                 <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-medium text-gray-500">Market growth</div>
-                  <div className={`mt-1 text-xl font-semibold tabular-nums ${growthIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                  <div
+                    className={`mt-1 text-xl font-semibold tabular-nums ${
+                      growthIsPos ? "text-emerald-700" : "text-red-700"
+                    }`}
+                  >
                     {kpis.tfMarketGrowth >= 0 ? "+" : ""}
                     {fmtMoney(kpis.tfMarketGrowth ?? 0)}
                   </div>
                 </div>
               </div>
 
-              {/* cleaner bar */}
+              {/* bar */}
               <div className="mt-4">
                 <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100 border">
                   <div className="h-full flex">
@@ -720,11 +723,15 @@ export default function OverviewTab() {
 
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`} />
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`}
+                    />
                     <span className="tabular-nums">Contrib ({fmtNumber(contribPct, 0)}%)</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`} />
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`}
+                    />
                     <span className="tabular-nums">Growth ({fmtNumber(growthPct, 0)}%)</span>
                   </div>
                 </div>
@@ -773,7 +780,7 @@ export default function OverviewTab() {
         </div>
       </div>
 
-      {/* Trend chart (cleaner) */}
+      {/* Trend chart (clipping fixed) */}
       <Card>
         <CardContent className="h-[280px] pt-6">
           {historyError ? (
@@ -784,7 +791,7 @@ export default function OverviewTab() {
             <p className="text-sm text-gray-600">Add positions (with purchase dates) to see historical trend.</p>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={chartData} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+              <LineChart data={chartData} margin={{ top: 8, right: 18, left: 18, bottom: 8 }}>
                 <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.25} />
                 <XAxis
                   dataKey="d"
@@ -795,6 +802,7 @@ export default function OverviewTab() {
                   axisLine={false}
                 />
                 <YAxis
+                  width={92}
                   domain={yAxis.domain}
                   ticks={yAxis.ticks}
                   tickFormatter={(v: number) => (mode === "dollar" ? fmtMoney(v) : `${fmtNumber(v, 1)}%`)}
@@ -864,13 +872,13 @@ export default function OverviewTab() {
                   }}
                 />
 
-                <Line type="monotone" dataKey="v" stroke="#2563eb" strokeWidth={2.5} dot={false} />
+                {/* ✅ Do not hardcode chart colors */}
+                <Line type="monotone" dataKey="v" strokeWidth={2.5} dot={false} />
 
                 {showBenchmark && (
                   <Line
                     type="monotone"
                     dataKey="b"
-                    stroke="#111827"
                     strokeWidth={2}
                     strokeDasharray="6 6"
                     dot={false}
@@ -930,3 +938,9 @@ export default function OverviewTab() {
     </div>
   );
 }
+
+/**
+ * Local import to avoid circulars.
+ * If you already import valueForPosition at the top elsewhere, remove this.
+ */
+import { valueForPosition } from "@/lib/portfolioStorage";

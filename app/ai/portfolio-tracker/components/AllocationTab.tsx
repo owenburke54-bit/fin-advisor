@@ -18,7 +18,11 @@ import {
   CartesianGrid,
 } from "recharts";
 
-const COLORS = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#84cc16", "#a3a3a3"];
+/**
+ * ✅ NOTE:
+ * - Do NOT specify colors per our project style rule.
+ * - Keep visuals clean, stable, and mobile-friendly.
+ */
 
 const moneyFmt0 = new Intl.NumberFormat(undefined, {
   style: "currency",
@@ -78,13 +82,19 @@ export default function AllocationTab() {
   const { state, diversificationScore, diversificationDetails, topConcentrations } = usePortfolioState();
   const isMobile = useMediaQuery("(max-width: 640px)");
 
-  const { assetData, accountData, total, stackedAccountRows, assetKeys } = useMemo(() => {
+  const {
+    assetData,
+    accountData,
+    total,
+    stackedAccountRows,
+    assetKeys,
+  } = useMemo(() => {
     const byAsset = new Map<string, number>();
     const byAccount = new Map<string, number>();
     const byAccountAsset = new Map<string, Map<string, number>>();
     let total = 0;
 
-    for (const p of state.positions) {
+    for (const p of state.positions ?? []) {
       const v = valueForPosition(p);
       total += v;
 
@@ -97,21 +107,23 @@ export default function AllocationTab() {
       inner.set(p.assetClass, (inner.get(p.assetClass) ?? 0) + v);
     }
 
-    const assetData = Array.from(byAsset.entries()).map(([name, value]) => ({
-      name,
-      value: Number(value.toFixed(2)),
-      percent: total ? value / total : 0,
-    }));
+    const assetData = Array.from(byAsset.entries())
+      .map(([name, value]) => ({
+        name,
+        value: Number(value.toFixed(2)),
+        percent: total ? value / total : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
 
-    const accountData = Array.from(byAccount.entries()).map(([name, value]) => ({
-      name,
-      value: Number(value.toFixed(2)),
-      percent: total ? value / total : 0,
-    }));
+    const accountData = Array.from(byAccount.entries())
+      .map(([name, value]) => ({
+        name,
+        value: Number(value.toFixed(2)),
+        percent: total ? value / total : 0,
+      }))
+      .sort((a, b) => b.value - a.value);
 
-    assetData.sort((a, b) => b.value - a.value);
-    accountData.sort((a, b) => b.value - a.value);
-
+    // stable ordering for stacked bars + legend
     const assetKeys = assetData.map((d) => d.name);
 
     const stackedAccountRows = accountData.map((acc) => {
@@ -125,11 +137,6 @@ export default function AllocationTab() {
   }, [state.positions]);
 
   const tierMeta = scoreLabel(diversificationScore);
-
-  const colorForAsset = (assetName: string) => {
-    const idx = assetKeys.findIndex((k) => k === assetName);
-    return COLORS[(idx >= 0 ? idx : 0) % COLORS.length];
-  };
 
   return (
     <div className="space-y-4">
@@ -161,12 +168,13 @@ export default function AllocationTab() {
                         label={false}
                         isAnimationActive={false}
                       >
+                        {/* ✅ no explicit fill colors; let recharts assign defaults */}
                         {assetData.map((d) => (
-                          <Cell key={d.name} fill={colorForAsset(d.name)} />
+                          <Cell key={d.name} />
                         ))}
                       </Pie>
 
-                      {/* Center label (simple + reliable without SVG Label hacks) */}
+                      {/* Center label (no fragile Label hacks) */}
                       <text
                         x="50%"
                         y="47%"
@@ -215,14 +223,12 @@ export default function AllocationTab() {
                   </ResponsiveContainer>
                 </div>
 
-                {/* Cleaner custom legend (sorted, compact, professional) */}
+                {/* Custom legend: no color dependency */}
                 <div className={`mt-4 grid ${isMobile ? "grid-cols-2" : "grid-cols-3"} gap-x-5 gap-y-3`}>
                   {assetData.map((d) => (
                     <div key={d.name} className="flex items-start gap-2">
-                      <span
-                        className="mt-1.5 h-2.5 w-2.5 rounded-full shrink-0"
-                        style={{ backgroundColor: colorForAsset(d.name) }}
-                      />
+                      {/* neutral dot (not tied to chart color) */}
+                      <span className="mt-1.5 h-2.5 w-2.5 rounded-full shrink-0 bg-gray-300" />
                       <div className="min-w-0 w-full">
                         <div className="flex items-baseline justify-between gap-2">
                           <div className="text-xs font-medium text-gray-800 truncate">{shortAssetName(d.name)}</div>
@@ -296,10 +302,13 @@ export default function AllocationTab() {
                                 {rows.map((r: any) => (
                                   <div key={r.dataKey} className="flex items-center justify-between gap-4">
                                     <div className="flex items-center gap-2 min-w-0">
-                                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: r.color }} />
+                                      {/* keep simple; don't bind to chart color */}
+                                      <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
                                       <span className="text-gray-700 truncate">{shortAssetName(String(r.dataKey))}</span>
                                     </div>
-                                    <span className="font-medium text-gray-900 tabular-nums">{fmtDollar(Number(r.value))}</span>
+                                    <span className="font-medium text-gray-900 tabular-nums">
+                                      {fmtDollar(Number(r.value))}
+                                    </span>
                                   </div>
                                 ))}
                               </div>
@@ -311,18 +320,19 @@ export default function AllocationTab() {
                       {/* Invisible total for tooltip */}
                       <Bar dataKey="total" fill="transparent" stackId="__total" />
 
+                      {/* ✅ no explicit fill colors */}
                       {assetKeys.map((k) => (
-                        <Bar key={k} dataKey={k} stackId="acct" fill={colorForAsset(k)} isAnimationActive={false} />
+                        <Bar key={k} dataKey={k} stackId="acct" isAnimationActive={false} />
                       ))}
                     </BarChart>
                   </ResponsiveContainer>
                 </div>
 
-                {/* Custom legend (replaces Recharts Legend = cleaner) */}
-                <div className={`mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-700`}>
+                {/* Legend: neutral */}
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-gray-700">
                   {assetKeys.map((k) => (
                     <div key={k} className="flex items-center gap-2">
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: colorForAsset(k) }} />
+                      <span className="h-2.5 w-2.5 rounded-full bg-gray-300" />
                       <span className="font-medium">{shortAssetName(k)}</span>
                     </div>
                   ))}
@@ -331,10 +341,7 @@ export default function AllocationTab() {
                 {/* Summary chips */}
                 <div className={`mt-3 grid ${isMobile ? "grid-cols-1" : "grid-cols-2"} gap-2`}>
                   {stackedAccountRows.map((r) => (
-                    <div
-                      key={r.name}
-                      className="rounded-xl border bg-white px-3 py-2 flex items-center justify-between"
-                    >
+                    <div key={r.name} className="rounded-xl border bg-white px-3 py-2 flex items-center justify-between">
                       <div className="text-sm font-medium text-gray-800">{r.name}</div>
                       <div className="text-sm text-gray-900 font-semibold tabular-nums">
                         {fmtDollar(r.total)}{" "}
@@ -377,17 +384,23 @@ export default function AllocationTab() {
 
               <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Top 3 holdings</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">{Math.round(diversificationDetails.top3Pct * 100)}%</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {Math.round(diversificationDetails.top3Pct * 100)}%
+                </div>
               </div>
 
               <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Equity</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">{Math.round(diversificationDetails.buckets.equity * 100)}%</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {Math.round(diversificationDetails.buckets.equity * 100)}%
+                </div>
               </div>
 
               <div className="rounded-xl border bg-white p-3">
                 <div className="text-xs text-gray-600">Cash/MM</div>
-                <div className="mt-1 text-sm font-semibold text-gray-900">{Math.round(diversificationDetails.buckets.cash * 100)}%</div>
+                <div className="mt-1 text-sm font-semibold text-gray-900">
+                  {Math.round(diversificationDetails.buckets.cash * 100)}%
+                </div>
               </div>
             </div>
           )}
@@ -411,6 +424,44 @@ export default function AllocationTab() {
                 </li>
               ))}
             </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Optional: Quick table (helps when charts are hard to read on mobile) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Allocation Table</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {total === 0 ? (
+            <p className="text-sm text-gray-600">Add positions to see allocation.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-gray-500 border-b">
+                  <tr>
+                    <th className="py-2 text-left">Bucket</th>
+                    <th className="py-2 text-right">Weight</th>
+                    <th className="py-2 text-right">Value</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {assetData.map((d) => (
+                    <tr key={d.name} className="border-b last:border-0">
+                      <td className="py-2 font-medium text-gray-900">{shortAssetName(d.name)}</td>
+                      <td className="py-2 text-right tabular-nums">{fmtPct(d.percent)}</td>
+                      <td className="py-2 text-right tabular-nums">{fmtDollar(d.value)}</td>
+                    </tr>
+                  ))}
+                  <tr>
+                    <td className="py-2 font-semibold">Total</td>
+                    <td className="py-2" />
+                    <td className="py-2 text-right font-semibold tabular-nums">{fmtDollar(total)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           )}
         </CardContent>
       </Card>

@@ -36,6 +36,8 @@ export type DiversificationDetails = {
   why: string[]; // actionable bullets
 };
 
+type SetOpts = { snapshot?: boolean };
+
 export interface UsePortfolio {
   state: PortfolioState;
   loading: boolean;
@@ -47,13 +49,15 @@ export interface UsePortfolio {
   refreshPrices: (positionsOverride?: Position[]) => Promise<void>;
   takeSnapshot: () => void;
   setProfile: (profile: UserProfile) => void;
+
   addPosition: (p: Position) => void;
   updatePosition: (p: Position) => void;
   deletePosition: (id: string) => void;
   clearPositions: () => void;
 
-  // transactions
-  setTransactions: (txs: Transaction[]) => void;
+  // ✅ direct setters
+  setPositions: (positions: Position[], opts?: SetOpts) => void;
+  setTransactions: (txs: Transaction[], opts?: SetOpts) => void;
 
   exportJSON: () => string;
   importJSON: (json: string) => void;
@@ -110,59 +114,72 @@ function usePortfolioStateImpl(): UsePortfolio {
     setState((prev) => withSnapshot({ ...prev, positions: [] }));
   }, []);
 
-  const setTransactions = useCallback((txs: Transaction[]) => {
-    setState((prev) => withSnapshot({ ...prev, transactions: txs }));
+  // ✅ NEW: direct setters (snapshot default = true for user-visible actions)
+  const setPositions = useCallback((positions: Position[], opts?: SetOpts) => {
+    const snap = opts?.snapshot ?? true;
+    setState((prev) => {
+      const next = { ...prev, positions };
+      return snap ? withSnapshot(next) : next;
+    });
   }, []);
 
-  const refreshPrices = useCallback(
-    async (positionsOverride?: Position[]) => {
-      const positionsToUse = positionsOverride ?? state.positions;
+  const setTransactions = useCallback((txs: Transaction[], opts?: SetOpts) => {
+    const snap = opts?.snapshot ?? true;
+    setState((prev) => {
+      const next = { ...prev, transactions: txs };
+      return snap ? withSnapshot(next) : next;
+    });
+  }, []);
 
-      const tickers = Array.from(
-        new Set(
-          positionsToUse
-            .map((p) => (p.ticker || "").trim().toUpperCase())
-            .filter(Boolean),
-        ),
-      );
+  const refreshPrices = useCallback(async (positionsOverride?: Position[]) => {
+    const positionsToUse = positionsOverride ?? state.positions;
 
-      if (tickers.length === 0) return;
+    const tickers = Array.from(
+      new Set(
+        positionsToUse
+          .map((p) => (p.ticker || "").trim().toUpperCase())
+          .filter(Boolean),
+      ),
+    );
 
-      const data = await fetchPricesForTickers(tickers);
+    if (tickers.length === 0) return;
 
-      setState((prev) => {
-        const positions = prev.positions.map((p) => {
-          const t = (p.ticker || "").toUpperCase();
-          const isCashLikeLocal = p.assetClass === "Money Market" || p.assetClass === "Cash";
+    const data = await fetchPricesForTickers(tickers);
 
-          const md = data[t];
-          if (!md) {
-            if (isCashLikeLocal && (typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice))) {
-              return { ...p, currentPrice: 1 };
-            }
-            return p;
+    // ✅ IMPORTANT: do NOT snapshot on price refresh (prevents snapshot spam)
+    setState((prev) => {
+      const positions = prev.positions.map((p) => {
+        const t = (p.ticker || "").toUpperCase();
+        const isCashLikeLocal = p.assetClass === "Money Market" || p.assetClass === "Cash";
+
+        const md = data[t];
+        if (!md) {
+          if (isCashLikeLocal && (typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice))) {
+            return { ...p, currentPrice: 1 };
           }
+          return p;
+        }
 
-          return {
-            ...p,
-            currentPrice: md.price,
-            name: p.name || md.name || p.ticker,
-            sector: p.sector || md.sector,
-          };
-        });
-
-        return withSnapshot({ ...prev, positions });
+        return {
+          ...p,
+          currentPrice: md.price,
+          name: p.name || md.name || p.ticker,
+          sector: p.sector || md.sector,
+        };
       });
-    },
-    [state.positions],
-  );
+
+      return { ...prev, positions };
+    });
+  }, [state.positions]);
 
   // auto-fetch prices when positions exist and any are missing prices
   useEffect(() => {
     if (loading) return;
     if (state.positions.length === 0) return;
 
-    const missingAny = state.positions.some((p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice));
+    const missingAny = state.positions.some(
+      (p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice),
+    );
 
     if (missingAny) {
       void refreshPrices(state.positions);
@@ -396,13 +413,16 @@ function usePortfolioStateImpl(): UsePortfolio {
     };
 
     if (total <= 0) {
-      return { diversificationScore: 0, diversificationDetails: empty, topConcentrations: [] as { ticker: string; value: number; percent: number }[] };
+      return {
+        diversificationScore: 0,
+        diversificationDetails: empty,
+        topConcentrations: [] as { ticker: string; value: number; percent: number }[],
+      };
     }
 
     const byTicker = new Map<string, number>();
     const classes = new Set<AssetClass>();
 
-    // Buckets
     let equity = 0;
     let bonds = 0;
     let cash = 0;
@@ -439,7 +459,6 @@ function usePortfolioStateImpl(): UsePortfolio {
 
     const { tier, tierHint } = tierForScore(score);
 
-    // Actionable "why" bullets (targets are intentionally simple + beginner-friendly)
     const why: string[] = [];
 
     const top1Pct = top1?.percent ?? 0;
@@ -453,9 +472,7 @@ function usePortfolioStateImpl(): UsePortfolio {
     if (cashPct > 0.25) why.push(`Cash/MM is ${pctFmt(cashPct)}. Target (typical): ~5–15% unless saving for near-term goals.`);
     else if (cashPct > 0.15) why.push(`Cash/MM is ${pctFmt(cashPct)}. Consider deploying some into diversified funds if appropriate.`);
 
-    const equityPct = total > 0 ? equity / total : 0;
     const bondsPct = total > 0 ? bonds / total : 0;
-
     if (bondsPct === 0 && (state.profile?.riskLevel ?? 3) <= 2) {
       why.push(`Bonds are ${pctFmt(bondsPct)}. If your risk is conservative, consider adding some fixed income for stability.`);
     }
@@ -499,6 +516,7 @@ function usePortfolioStateImpl(): UsePortfolio {
     updatePosition,
     deletePosition,
     clearPositions,
+    setPositions,
     setTransactions,
     exportJSON,
     importJSON,

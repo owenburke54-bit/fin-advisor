@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Dialog, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/Dialog";
 import { usePortfolioState } from "@/lib/usePortfolioState";
-import type { Transaction, TxType, AccountType } from "@/lib/types";
+import type { Transaction, TxType, AccountType, Position, AssetClass } from "@/lib/types";
 import { fmtMoney } from "@/lib/format";
 
 const TX_TYPES: { value: TxType; label: string }[] = [
@@ -17,14 +17,7 @@ const TX_TYPES: { value: TxType; label: string }[] = [
   { value: "CASH_WITHDRAWAL", label: "Cash withdrawal" },
 ];
 
-const ACCOUNTS: AccountType[] = [
-  "Taxable",
-  "Roth IRA",
-  "Traditional IRA",
-  "401k/403b",
-  "HSA",
-  "Other",
-];
+const ACCOUNTS: AccountType[] = ["Taxable", "Roth IRA", "Traditional IRA", "401k/403b", "HSA", "Other"];
 
 function todayISO() {
   return new Date().toISOString().slice(0, 10);
@@ -40,8 +33,114 @@ function makeId() {
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * Rebuild positions from transaction history (source of truth).
+ * - Aggregates by (accountType, ticker)
+ * - BUY increases qty, updates weighted avg cost basis
+ * - SELL decreases qty, keeps cost basis (no realized P/L tracking yet)
+ * - Keeps metadata from existing positions when possible (assetClass/name/sector/currentPrice/purchaseDate)
+ */
+function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transaction[]): Position[] {
+  const seedByKey = new Map<string, Position>();
+  for (const p of seedPositions ?? []) {
+    const key = `${p.accountType || "Taxable"}::${(p.ticker || "").toUpperCase().trim()}`;
+    if (!seedByKey.has(key)) seedByKey.set(key, p);
+  }
+
+  type Agg = {
+    accountType: AccountType;
+    ticker: string;
+    qty: number;
+    cost: number; // weighted avg
+    earliestDate?: string;
+  };
+
+  const agg = new Map<string, Agg>();
+
+  // process in chronological order for correct avg cost / earliest date
+  const ordered = (txs ?? [])
+    .slice()
+    .filter((t) => t && t.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  for (const t of ordered) {
+    if (!t || !isTrade(t.type)) continue;
+
+    const ticker = (t.ticker ?? "").toUpperCase().trim();
+    const acct: AccountType = (t.accountType ?? "Taxable") as AccountType;
+
+    const qty = Number(t.quantity ?? 0);
+    if (!ticker || !Number.isFinite(qty) || qty <= 0) continue;
+
+    const key = `${acct}::${ticker}`;
+    const cur = agg.get(key) ?? { accountType: acct, ticker, qty: 0, cost: 0, earliestDate: undefined };
+
+    if (!cur.earliestDate || t.date < cur.earliestDate) cur.earliestDate = t.date;
+
+    if (t.type === "BUY") {
+      const px = Number(t.price ?? NaN);
+
+      // If no price, fallback to seed cost basis if we have it; otherwise ignore this BUY
+      const fallbackSeed = seedByKey.get(key);
+      const pxToUse =
+        Number.isFinite(px) && px > 0
+          ? px
+          : typeof fallbackSeed?.costBasisPerUnit === "number" && Number.isFinite(fallbackSeed.costBasisPerUnit)
+            ? fallbackSeed.costBasisPerUnit
+            : NaN;
+
+      if (!Number.isFinite(pxToUse) || pxToUse <= 0) continue;
+
+      const oldQty = cur.qty;
+      const oldCost = cur.cost;
+
+      const newQty = oldQty + qty;
+      const newCost = newQty > 0 ? (oldQty * oldCost + qty * pxToUse) / newQty : pxToUse;
+
+      cur.qty = newQty;
+      cur.cost = newCost;
+      agg.set(key, cur);
+    }
+
+    if (t.type === "SELL") {
+      cur.qty = Math.max(0, cur.qty - qty);
+      // cost stays the same for now
+      agg.set(key, cur);
+    }
+  }
+
+  const out: Position[] = [];
+
+  for (const [key, a] of agg.entries()) {
+    if (a.qty <= 0) continue;
+
+    const seed = seedByKey.get(key);
+    const assetClass: AssetClass = (seed?.assetClass ?? "Equity") as AssetClass;
+
+    out.push({
+      id: seed?.id ?? (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : key),
+      ticker: a.ticker,
+      name: seed?.name ?? a.ticker,
+      assetClass,
+      accountType: a.accountType,
+      quantity: Number(a.qty.toFixed(8)),
+      costBasisPerUnit: Number(a.cost.toFixed(6)),
+      currentPrice: seed?.currentPrice,
+      currency: "USD",
+      sector: seed?.sector,
+      purchaseDate: seed?.purchaseDate ?? a.earliestDate,
+      createdAt: seed?.createdAt ?? new Date().toISOString(),
+    });
+  }
+
+  out.sort((p1, p2) => (p1.accountType + p1.ticker).localeCompare(p2.accountType + p2.ticker));
+  return out;
+}
+
 export default function TransactionsTab() {
-  const { state, setTransactions } = usePortfolioState();
+  // ✅ IMPORTANT: setTransactions/setPositions now support opts { snapshot?: boolean }
+  // We snapshot once (on transactions) and avoid double-snapshotting on positions.
+  const { state, setTransactions, setPositions } = usePortfolioState();
   const [open, setOpen] = useState(false);
 
   // form state
@@ -54,9 +153,7 @@ export default function TransactionsTab() {
   const [accountType, setAccountType] = useState<AccountType>("Taxable");
 
   const rows = useMemo(() => {
-    return (state.transactions ?? [])
-      .slice()
-      .sort((a, b) => (a.date < b.date ? 1 : -1));
+    return (state.transactions ?? []).slice().sort((a, b) => (a.date < b.date ? 1 : -1));
   }, [state.transactions]);
 
   const summary = useMemo(() => {
@@ -68,11 +165,7 @@ export default function TransactionsTab() {
       if (t.type === "CASH_WITHDRAWAL") withdrawals += Number(t.amount || 0);
     }
 
-    return {
-      deposits,
-      withdrawals,
-      net: deposits - withdrawals,
-    };
+    return { deposits, withdrawals, net: deposits - withdrawals };
   }, [state.transactions]);
 
   function resetForm() {
@@ -111,25 +204,37 @@ export default function TransactionsTab() {
       tx.amount = amt;
     }
 
-    setTransactions([tx, ...(state.transactions ?? [])]);
+    const nextTxs = [tx, ...(state.transactions ?? [])];
+
+    // ✅ snapshot ONCE (transactions)
+    setTransactions(nextTxs, { snapshot: true });
+
+    // ✅ rebuild positions so every tab updates immediately, but DON'T snapshot again
+    const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
+    setPositions(nextPositions, { snapshot: false });
+
     resetForm();
     setOpen(false);
   }
 
   function removeTx(id: string) {
-    setTransactions((state.transactions ?? []).filter((t) => t.id !== id));
+    const nextTxs = (state.transactions ?? []).filter((t) => t.id !== id);
+
+    // ✅ snapshot ONCE (transactions)
+    setTransactions(nextTxs, { snapshot: true });
+
+    // ✅ rebuild after delete too (no snapshot)
+    const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
+    setPositions(nextPositions, { snapshot: false });
   }
 
   function describeTx(t: Transaction) {
     if (isTrade(t.type)) {
-      const notional =
-        t.price && t.quantity ? t.price * t.quantity : null;
+      const notional = t.price && t.quantity ? t.price * t.quantity : null;
 
-      return `${t.type === "BUY" ? "Buy" : "Sell"} ${
-        t.quantity
-      }${t.price ? ` @ ${fmtMoney(t.price, 2)}` : ""}${
-        notional ? ` • ${fmtMoney(notional, 2)}` : ""
-      }`;
+      return `${t.type === "BUY" ? "Buy" : "Sell"} ${t.quantity}${
+        t.price ? ` @ ${fmtMoney(t.price, 2)}` : ""
+      }${notional ? ` • ${fmtMoney(notional, 2)}` : ""}`;
     }
 
     return t.type === "CASH_DEPOSIT"
@@ -166,9 +271,7 @@ export default function TransactionsTab() {
         </CardHeader>
         <CardContent>
           {rows.length === 0 ? (
-            <p className="text-sm text-gray-600">
-              No transactions yet. Add deposits, withdrawals, and trades.
-            </p>
+            <p className="text-sm text-gray-600">No transactions yet. Add deposits, withdrawals, and trades.</p>
           ) : (
             <table className="w-full text-sm">
               <thead className="text-gray-500 border-b">
@@ -183,11 +286,9 @@ export default function TransactionsTab() {
                 {rows.map((t) => (
                   <tr key={t.id} className="border-b last:border-0">
                     <td className="py-2">{t.date}</td>
-                    <td className="py-2">{t.accountType}</td>
+                    <td className="py-2">{t.accountType ?? "Taxable"}</td>
                     <td className="py-2">
-                      <div className="font-medium">
-                        {isTrade(t.type) ? t.ticker : "Cash"}
-                      </div>
+                      <div className="font-medium">{isTrade(t.type) ? t.ticker : "Cash"}</div>
                       <div className="text-gray-600">{describeTx(t)}</div>
                     </td>
                     <td className="py-2 text-right">
