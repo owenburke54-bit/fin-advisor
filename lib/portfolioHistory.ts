@@ -72,10 +72,7 @@ function clampStartNotFuture(startISO: string, endISO: string): string {
   return startISO;
 }
 
-async function fetchWithTimeout(
-  input: RequestInfo,
-  init: RequestInit & { timeoutMs?: number } = {},
-) {
+async function fetchWithTimeout(input: RequestInfo, init: RequestInit & { timeoutMs?: number } = {}) {
   const { timeoutMs = 12000, ...rest } = init;
 
   const controller = new AbortController();
@@ -299,14 +296,13 @@ export async function fetchPortfolioSeries(opts: {
 
     // If history fails, return flat-ish series using current prices
     if (!res.ok) {
-      const approx =
-        cashConstant +
-        marketLike.reduce((acc, p) => {
-          return acc + currentValueApprox(p);
-        }, 0);
+      const approx = cashConstant + marketLike.reduce((acc, p) => acc + currentValueApprox(p), 0);
 
       const v = Number(approx.toFixed(2));
-      const flat: PortfolioSeriesPoint[] = [{ date: start, value: v }, { date: end, value: v }];
+      const flat: PortfolioSeriesPoint[] = [
+        { date: start, value: v },
+        { date: end, value: v },
+      ];
       if (interval === "1wk") return takeWeekEnd(flat);
       if (interval === "1mo") return takeMonthEnd(flat);
       return flat;
@@ -332,18 +328,18 @@ export async function fetchPortfolioSeries(opts: {
       for (const pt of pts) allDates.add(pt.date);
     }
 
+    // ✅ FIX: dates are strings, so compare string-to-string
     const dates = Array.from(allDates).sort((a, b) => a.localeCompare(b));
 
     // No dates => fallback flat
     if (dates.length === 0) {
-      const approx =
-        cashConstant +
-        marketLike.reduce((acc, p) => {
-          return acc + currentValueApprox(p);
-        }, 0);
+      const approx = cashConstant + marketLike.reduce((acc, p) => acc + currentValueApprox(p), 0);
 
       const v = Number(approx.toFixed(2));
-      const flat: PortfolioSeriesPoint[] = [{ date: start, value: v }, { date: end, value: v }];
+      const flat: PortfolioSeriesPoint[] = [
+        { date: start, value: v },
+        { date: end, value: v },
+      ];
       if (interval === "1wk") return takeWeekEnd(flat);
       if (interval === "1mo") return takeMonthEnd(flat);
       return flat;

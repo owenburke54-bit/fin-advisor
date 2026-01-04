@@ -48,17 +48,18 @@ function cashLikeValue(p: Position): number {
   const cp = isNumber(p.currentPrice) ? p.currentPrice : undefined;
   const cb = isNumber(p.costBasisPerUnit) ? p.costBasisPerUnit : 0;
 
-  // If qty=1 and currentPrice looks like a balance (>> 1), treat that as current balance (Style A)
-  if (qty === 1 && typeof cp === "number" && cp > 1.0001) {
+  // Treat qty=1 as "balance container".
+  // If currentPrice is set and not ~1, interpret it as the current balance (Style A).
+  if (qty === 1 && typeof cp === "number" && Number.isFinite(cp) && Math.abs(cp - 1) > 1e-9) {
     return cp;
   }
 
-  // Legacy Style B: balance stored in costBasisPerUnit (qty=1, currentPrice≈1 or missing)
-  if (qty === 1 && (cp === undefined || Math.abs(cp - 1) < 1e-9)) {
+  // Style B: balance stored in costBasisPerUnit (qty=1, currentPrice≈1 or missing)
+  if (qty === 1) {
     return cb > 0 ? cb : 0;
   }
 
-  // Legacy Style C: balance stored in quantity (currentPrice≈1)
+  // Style C: balance stored in quantity (currentPrice≈1 or missing)
   if (cp === undefined || Math.abs(cp - 1) < 1e-9) {
     return qty > 0 ? qty : 0;
   }

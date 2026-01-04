@@ -83,6 +83,17 @@ function pctFmt(p: number) {
   return `${Math.round(p * 100)}%`;
 }
 
+// Keep in sync with TransactionsTab (baseline positions seed used for tx rebuild)
+const POS_SEED_KEY = "fin-advisor:portfolioTracker:positionsSeed:v1";
+function clearPositionsSeed() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(POS_SEED_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 function usePortfolioStateImpl(): UsePortfolio {
   const [state, setState] = useState<PortfolioState>(getInitialState());
   const [loading, setLoading] = useState(true);
@@ -116,10 +127,12 @@ function usePortfolioStateImpl(): UsePortfolio {
   }, []);
 
   const clearPositions = useCallback(() => {
+    // If the user wipes positions, any prior tx baseline seed is no longer valid.
+    clearPositionsSeed();
     setState((prev) => withSnapshot({ ...prev, positions: [] }));
   }, []);
 
-  // ✅ NEW: direct setters (snapshot default = true for user-visible actions)
+  // ✅ direct setters (snapshot default = true for user-visible actions)
   const setPositions = useCallback((positions: Position[], opts?: SetOpts) => {
     const snap = opts?.snapshot ?? true;
     setState((prev) => {
@@ -130,13 +143,17 @@ function usePortfolioStateImpl(): UsePortfolio {
 
   const setTransactions = useCallback((txs: Transaction[], opts?: SetOpts) => {
     const snap = opts?.snapshot ?? true;
+
+    // If user clears transactions, tx baseline seed should be cleared too.
+    if (!txs || txs.length === 0) clearPositionsSeed();
+
     setState((prev) => {
       const next = { ...prev, transactions: txs };
       return snap ? withSnapshot(next) : next;
     });
   }, []);
 
-  // ✅ NEW: SAFE transaction helpers (always merges via prev state)
+  // ✅ SAFE transaction helpers (always merges via prev state)
   const addTransaction = useCallback((tx: Transaction, opts?: SetOpts) => {
     const snap = opts?.snapshot ?? true;
     setState((prev) => {
@@ -148,7 +165,12 @@ function usePortfolioStateImpl(): UsePortfolio {
   const deleteTransaction = useCallback((id: string, opts?: SetOpts) => {
     const snap = opts?.snapshot ?? true;
     setState((prev) => {
-      const next = { ...prev, transactions: (prev.transactions ?? []).filter((t) => t.id !== id) };
+      const nextTxs = (prev.transactions ?? []).filter((t) => t.id !== id);
+
+      // If last tx removed, clear baseline seed.
+      if (nextTxs.length === 0) clearPositionsSeed();
+
+      const next = { ...prev, transactions: nextTxs };
       return snap ? withSnapshot(next) : next;
     });
   }, []);
@@ -211,7 +233,9 @@ function usePortfolioStateImpl(): UsePortfolio {
     if (loading) return;
     if (state.positions.length === 0) return;
 
-    const missingAny = state.positions.some((p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice));
+    const missingAny = state.positions.some(
+      (p) => typeof p.currentPrice !== "number" || !Number.isFinite(p.currentPrice),
+    );
 
     if (missingAny) {
       void refreshPrices(state.positions);
@@ -231,6 +255,9 @@ function usePortfolioStateImpl(): UsePortfolio {
     (json: string) => {
       try {
         const parsed = JSON.parse(json) as Partial<PortfolioState>;
+
+        // New imported dataset => any tx-baseline seed is stale.
+        clearPositionsSeed();
 
         const next: PortfolioState = {
           profile: parsed.profile ?? null,
@@ -258,7 +285,16 @@ function usePortfolioStateImpl(): UsePortfolio {
   }
 
   const exportCSV = useCallback((): string => {
-    const header = ["ticker", "name", "assetClass", "accountType", "quantity", "costBasisPerUnit", "purchaseDate", "currentPrice"].join(",");
+    const header = [
+      "ticker",
+      "name",
+      "assetClass",
+      "accountType",
+      "quantity",
+      "costBasisPerUnit",
+      "purchaseDate",
+      "currentPrice",
+    ].join(",");
 
     const lines = state.positions.map((p) =>
       [

@@ -50,7 +50,52 @@ function txKey(acct: AccountType, ticker: string) {
 }
 
 /**
- * Rebuild positions from transactions (Model A, incremental):
+ * IMPORTANT (Model A):
+ * Rebuild must start from a stable "baseline" positions list (pre-transaction).
+ * Otherwise deposits/buys get applied repeatedly each time you add another tx.
+ *
+ * We persist a baseline copy in localStorage the first time transactions appear.
+ */
+const POS_SEED_KEY = "fin-advisor:portfolioTracker:positionsSeed:v1";
+
+function deepClonePositions(ps: Position[]): Position[] {
+  // structuredClone is great but not always available; JSON works for our plain objects
+  return JSON.parse(JSON.stringify(ps ?? [])) as Position[];
+}
+
+function loadPositionsSeed(): Position[] | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(POS_SEED_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed as Position[];
+  } catch {
+    return null;
+  }
+}
+
+function savePositionsSeed(seed: Position[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(POS_SEED_KEY, JSON.stringify(seed ?? []));
+  } catch {
+    // ignore
+  }
+}
+
+function clearPositionsSeed() {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(POS_SEED_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Rebuild positions from transactions (Model A, from baseline seed):
  * - Seed holdings remain the baseline
  * - Trades adjust both: holdings AND cash (BUY consumes cash, SELL adds cash)
  * - Cash flows adjust cash
@@ -74,7 +119,6 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     qty: number;
     cost: number; // avg cost per unit
     earliestDate?: string;
-    didInitFromSeed?: boolean;
   };
 
   const agg = new Map<string, Agg>();
@@ -88,7 +132,6 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     .filter((t) => t && t.date)
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  // Helper: accumulate cash delta
   function bumpCash(acct: AccountType, delta: number, date?: string) {
     if (!Number.isFinite(delta) || delta === 0) return;
     const cur = cashDeltaByAcct.get(acct) ?? { delta: 0, earliest: undefined as string | undefined };
@@ -99,7 +142,6 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     cashDeltaByAcct.set(acct, cur);
   }
 
-  // Helper: get/initialize Agg for a traded key, seeded from existing holdings
   function getAgg(acct: AccountType, ticker: string, date?: string): Agg {
     const k = txKey(acct, ticker);
     const existing = agg.get(k);
@@ -109,8 +151,8 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     }
 
     const seed = seedByKey.get(k);
-    const seededQty = seed?.quantity ?? 0;
-    const seededCost = seed?.costBasisPerUnit ?? 0;
+    const seededQty = Number(seed?.quantity ?? 0);
+    const seededCost = Number(seed?.costBasisPerUnit ?? 0);
 
     const a: Agg = {
       accountType: acct,
@@ -118,23 +160,24 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
       qty: Number.isFinite(seededQty) ? seededQty : 0,
       cost: Number.isFinite(seededCost) ? seededCost : 0,
       earliestDate: date,
-      didInitFromSeed: !!seed,
     };
 
     agg.set(k, a);
     return a;
   }
 
-  // Helper: determine a trade price to use for notional/cost updates
+  // Determine trade price for notional/cost updates:
+  // Prefer tx.price; else seed.currentPrice; else seed.costBasisPerUnit.
   function tradePriceToUse(acct: AccountType, ticker: string, rawPx: unknown): number | null {
     const px = Number(rawPx);
     if (Number.isFinite(px) && px > 0) return px;
 
     const seed = seedByKey.get(txKey(acct, ticker));
-    const seedPxCandidates = [seed?.currentPrice, seed?.costBasisPerUnit].map((v) => Number(v));
-    for (const c of seedPxCandidates) {
-      if (Number.isFinite(c) && c > 0) return c;
-    }
+    const seedPx = Number(seed?.currentPrice);
+    if (Number.isFinite(seedPx) && seedPx > 0) return seedPx;
+
+    const seedCb = Number(seed?.costBasisPerUnit);
+    if (Number.isFinite(seedCb) && seedCb > 0) return seedCb;
 
     return null;
   }
@@ -164,12 +207,12 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     tradeKeys.add(k);
 
     const cur = getAgg(acct, ticker, t.date);
-
     const pxToUse = tradePriceToUse(acct, ticker, t.price);
 
+    // If we can't price the trade, skip it entirely (prevents "free shares" inflating totals).
+    if (pxToUse == null) continue;
+
     if (t.type === "BUY") {
-      // Update holdings
-      if (pxToUse == null) continue; // cannot compute cost/notional reliably
       const oldQty = cur.qty;
       const oldCost = cur.cost;
 
@@ -185,9 +228,6 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     }
 
     if (t.type === "SELL") {
-      // For SELL, we still want cash impact even if price missing; use fallback
-      if (pxToUse == null) continue;
-
       cur.qty = Math.max(0, cur.qty - qty);
       agg.set(k, cur);
 
@@ -199,7 +239,6 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
   // Build updated positions for traded keys (preserving seed metadata)
   const rebuiltTrades: Position[] = [];
   for (const [k, a] of agg.entries()) {
-    // If qty ends at 0, we drop the position (like fully sold)
     if (!Number.isFinite(a.qty) || a.qty <= 0) continue;
 
     const seed = seedByKey.get(k);
@@ -221,8 +260,8 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
     });
   }
 
-  // ✅ Keep all seed positions NOT touched by trades
-  // BUT: if we are applying cash deltas, we’ll replace the cash/MM position for those accounts
+  // Keep all seed positions NOT touched by trades
+  // BUT: if applying cash deltas, replace the cash/MM position for those accounts
   const kept = (seedPositions ?? []).filter((p) => {
     const k = keyFor(p);
     if (tradeKeys.has(k)) return false;
@@ -245,12 +284,10 @@ function rebuildPositionsFromTransactions(seedPositions: Position[], txs: Transa
       null;
 
     const starting = existing ? valueForPosition(existing) : 0;
-
-    // In Model A we allow cash to go negative if you buy without deposits (margin/overdraft).
-    // If you want to clamp at 0, change this to Math.max(0, starting + delta).
-    const nextBalance = starting + delta;
+    const nextBalance = starting + delta; // allow negative (margin/overdraft)
 
     if (existing) {
+      // Store balance in stable legacy-friendly way: qty=1, costBasisPerUnit=balance, currentPrice=1
       rebuiltCash.push({
         ...existing,
         quantity: 1,
@@ -334,8 +371,29 @@ export default function TransactionsTab() {
     setAccountType("Taxable");
   }
 
+  function ensureSeedForTransactions(nextTxs: Transaction[]) {
+    // If no transactions, baseline seed is no longer needed
+    if (!nextTxs || nextTxs.length === 0) {
+      clearPositionsSeed();
+      return;
+    }
+
+    // If we already have a seed, keep it.
+    const existing = loadPositionsSeed();
+    if (existing && Array.isArray(existing)) return;
+
+    // First time transactions appear: save current positions as baseline.
+    // IMPORTANT: this must happen BEFORE we apply rebuild logic.
+    const baseline = deepClonePositions(state.positions ?? []);
+    savePositionsSeed(baseline);
+  }
+
   async function syncAfterTx(nextTxs: Transaction[]) {
-    const nextPositions = rebuildPositionsFromTransactions(state.positions ?? [], nextTxs);
+    ensureSeedForTransactions(nextTxs);
+
+    const seed = loadPositionsSeed() ?? deepClonePositions(state.positions ?? []);
+    const nextPositions = rebuildPositionsFromTransactions(seed, nextTxs);
+
     setPositions(nextPositions);
     await refreshPrices(nextPositions);
   }
@@ -362,6 +420,10 @@ export default function TransactionsTab() {
     }
 
     const nextTxs = [tx, ...(state.transactions ?? [])];
+
+    // ✅ Ensure we snapshot baseline BEFORE applying any tx rebuild
+    ensureSeedForTransactions(nextTxs);
+
     setTransactions(nextTxs);
     await syncAfterTx(nextTxs);
 
@@ -371,6 +433,21 @@ export default function TransactionsTab() {
 
   async function removeTx(id: string) {
     const nextTxs = (state.transactions ?? []).filter((t) => t.id !== id);
+
+    // If we removed the last tx, restore to baseline and clear seed
+    if (nextTxs.length === 0) {
+      const seed = loadPositionsSeed();
+      clearPositionsSeed();
+
+      if (seed) {
+        setPositions(seed);
+        await refreshPrices(seed);
+      }
+
+      setTransactions(nextTxs);
+      return;
+    }
+
     setTransactions(nextTxs);
     await syncAfterTx(nextTxs);
   }
@@ -380,9 +457,9 @@ export default function TransactionsTab() {
       const notional =
         typeof t.price === "number" && typeof t.quantity === "number" ? t.price * t.quantity : null;
 
-      return `${t.type === "BUY" ? "Buy" : "Sell"} ${t.quantity}${
-        t.price ? ` @ ${fmtMoney(t.price)}` : ""
-      }${notional ? ` • ${fmtMoney(notional)}` : ""}`;
+      return `${t.type === "BUY" ? "Buy" : "Sell"} ${t.quantity}${t.price ? ` @ ${fmtMoney(t.price)}` : ""}${
+        notional ? ` • ${fmtMoney(notional)}` : ""
+      }`;
     }
 
     return t.type === "CASH_DEPOSIT" ? `+ ${fmtMoney(Number(t.amount))}` : `- ${fmtMoney(Number(t.amount))}`;
