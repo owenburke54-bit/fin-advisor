@@ -8,6 +8,7 @@ import {
   isEquityLike,
   targetMixForRisk,
 } from "@/lib/types";
+import { valueForPosition } from "@/lib/portfolioStorage";
 
 type DiversificationDetails = {
   tier?: string;
@@ -24,7 +25,7 @@ interface AdvisorRequest {
   positions: Position[];
   snapshot: PortfolioSnapshot | null;
   diversificationScore: number;
-  diversificationDetails?: DiversificationDetails; // optional for backward compatibility
+  diversificationDetails?: DiversificationDetails;
 }
 
 export async function POST(req: Request) {
@@ -55,92 +56,108 @@ function buildInsightsMarkdown(req: AdvisorRequest): string {
 
   const hasRoth = positions.some((p) => p.accountType === "Roth IRA");
 
-  const lines: string[] = [];
+  // profile field compat (so this route won’t break if names differ)
+  const horizon =
+    (profile as any).investmentHorizonYears ??
+    (profile as any).horizonYears ??
+    (profile as any).horizon ??
+    20;
 
-  lines.push("# AI Portfolio Insights");
-  lines.push("> Educational only. Not financial advice.");
-  lines.push("");
+  const goal =
+    (profile as any).primaryGoal ??
+    (profile as any).goal ??
+    "Wealth Building";
 
-  // Snapshot
-  lines.push("## Snapshot");
-  lines.push(
-    `- Risk level: ${profile.riskLevel}/5 • Horizon: ${profile.investmentHorizonYears}y • Goal: ${profile.primaryGoal}`,
-  );
-  lines.push(`- Current allocation: Equity ${pct(mix.equity)}, Bonds ${pct(mix.bonds)}, Cash/MM ${pct(mix.cash)}`);
-  lines.push(
-    `- Target allocation: Equity ${pct(target.equity)}, Bonds ${pct(target.bonds)}, Cash/MM ${pct(target.cash)}`,
-  );
-
-  if (snapshot) {
-    lines.push(
-      `- Value: ${money(snapshot.totalValue)} • Unrealized P/L: ${money(snapshot.totalGainLossDollar)} (${snapshot.totalGainLossPercent.toFixed(2)}%)`,
-    );
-  } else {
-    lines.push(`- Portfolio value: ${money(totals.total)}`);
-  }
-
-  lines.push("");
-
-  // Diversification
-  lines.push("## Diversification");
-  lines.push(`- Diversification score: ${diversificationScore}/100`);
-
-  if (diversificationDetails?.tier) {
-    lines.push(
-      `- Tier: ${diversificationDetails.tier}${
-        diversificationDetails.tierHint ? ` — ${diversificationDetails.tierHint}` : ""
-      }`,
-    );
-  }
+  const tier = diversificationDetails?.tier ?? "—";
 
   const topHoldPct =
-    typeof diversificationDetails?.topHoldingPct === "number" ? diversificationDetails.topHoldingPct : top[0]?.weight ?? 0;
+    typeof diversificationDetails?.topHoldingPct === "number"
+      ? diversificationDetails.topHoldingPct
+      : top[0]?.weight ?? 0;
 
   const top3Pct =
     typeof diversificationDetails?.top3Pct === "number"
       ? diversificationDetails.top3Pct
       : top.slice(0, 3).reduce((a, b) => a + b.weight, 0);
 
-  if (top.length) {
-    lines.push(`- Top holding: ${top[0]?.ticker ?? "—"} (${pct(topHoldPct)}) • Top 3: ${pct(top3Pct)}`);
-  }
+  const label = portfolioLabel({ mix, diversificationScore, top1: topHoldPct });
 
-  if (concWarnings.length) {
-    for (const w of concWarnings) lines.push(`- ${w}`);
+  const lines: string[] = [];
+
+  lines.push("# AI Portfolio Insights");
+  lines.push("> Educational only. Not financial advice.");
+  lines.push("");
+
+  // ---- Snapshot (tight + premium) ----
+  lines.push("## Snapshot");
+  lines.push(
+    `- Portfolio DNA: **${label}** • Risk **${profile.riskLevel}/5** • Horizon **${horizon}y** • Goal **${goal}**`,
+  );
+  lines.push(
+    `- Mix now: **Equity ${pct(mix.equity)} / Bonds ${pct(mix.bonds)} / Cash-MM ${pct(mix.cash)}**`,
+  );
+  lines.push(
+    `- Target mix: **Equity ${pct(target.equity)} / Bonds ${pct(target.bonds)} / Cash-MM ${pct(target.cash)}**`,
+  );
+
+  if (snapshot) {
+    const plPct =
+      typeof snapshot.totalGainLossPercent === "number" && Number.isFinite(snapshot.totalGainLossPercent)
+        ? snapshot.totalGainLossPercent
+        : 0;
+
+    lines.push(
+      `- Value: **${money(snapshot.totalValue)}** • P/L: **${money(snapshot.totalGainLossDollar)}** (${plPct.toFixed(2)}%)`,
+    );
   } else {
-    lines.push("- No major concentration flags detected (based on common thresholds).");
-  }
-
-  if (diversificationDetails?.why?.length) {
-    lines.push("");
-    lines.push("### Why this score");
-    for (const w of diversificationDetails.why.slice(0, 5)) lines.push(`- ${w}`);
+    lines.push(`- Value: **${money(totals.total)}**`);
   }
 
   lines.push("");
 
-  // Action plan
-  lines.push("## Action Plan (next 3 steps)");
+  // ---- Signals (short, unique, not bland) ----
+  lines.push("## Signals (what stands out)");
+  lines.push(`- Diversification: **${diversificationScore}/100** (${tier})`);
+  if (top.length) {
+    lines.push(`- Concentration: top holding **${top[0]?.ticker ?? "—"}** at **${pct(topHoldPct)}** • top 3 at **${pct(top3Pct)}**`);
+  }
+
+  const drift = driftSummary(mix, target);
+  lines.push(`- Biggest drift: **${drift.bucket}** (${drift.summary})`);
+
+  // Keep warnings concise
+  if (concWarnings.length) {
+    for (const w of concWarnings.slice(0, 2)) lines.push(`- ${w}`);
+  }
+
+  lines.push("");
+
+  // ---- Next best actions (fast + actionable) ----
+  lines.push("## Next best actions (3 moves)");
   lines.push(
-    `- 1) ${
-      hasRoth
-        ? "Rebalance inside your **Roth IRA** first (often avoids taxes), then adjust taxable accounts if needed."
-        : "Rebalance in the lowest-tax-impact accounts first (retirement accounts if applicable), then taxable if needed."
+    `- 1) ${hasRoth
+      ? "Rebalance inside your **Roth IRA** first (often avoids taxes), then adjust taxable if needed."
+      : "Rebalance in the lowest-tax-impact accounts first (retirement if applicable), then taxable if needed."
     }`,
   );
 
-  if (rebalance.actions.length) {
-    for (const a of rebalance.actions.slice(0, 3)) lines.push(`${a}`);
+  const action2 = rebalance.actions.find((a) => a.startsWith("- 2)"));
+  if (action2) {
+    lines.push(action2);
   } else {
-    lines.push("- 2) Your allocation is already close to target. Keep contributions consistent and rebalance periodically.");
+    // fallback: still useful
+    lines.push("- 2) Use new contributions to close the largest gap first (usually simplest + tax-friendly).");
   }
 
-  lines.push("- 3) Reduce single-name risk over time: aim for top holding < 20% and top 3 holdings < 60% (general guideline).");
+  // a “discipline rule” that feels like a real advisor
+  lines.push(
+    `- 3) Set a rule: rebalance when a bucket drifts **~5–10%** from target (or quarterly), and keep single-name exposure intentional.`,
+  );
 
   lines.push("");
 
-  // Rebalance table
-  lines.push("## Rebalance Table");
+  // ---- Rebalance table (still valuable, keep it) ----
+  lines.push("## Rebalance Table (bucket-level)");
   lines.push("| Bucket | Current % | Target % | Delta % | $ to move |");
   lines.push("|---|---:|---:|---:|---:|");
   for (const row of rebalance.tableRows) {
@@ -153,33 +170,22 @@ function buildInsightsMarkdown(req: AdvisorRequest): string {
 
   lines.push("");
 
-  // How to implement (category-based)
-  lines.push("## How to implement (category-based)");
+  // ---- Implementation (short, but “smart”) ----
+  lines.push("## Implementation (clean + realistic)");
   if (rebalance.primaryFundingSource === "cash") {
     lines.push(
-      `- Primary funding source: **Cash/MM** (you’re overweight). Shift toward diversified **equity index funds** and/or **broad bond funds** based on your target mix.`,
+      `- You’re funding from **Cash/MM** → deploy gradually (e.g., monthly) into diversified buckets that are underweight.`,
     );
   } else if (rebalance.primaryFundingSource === "sell-overweights") {
     lines.push(
-      `- You’re underweight Cash/MM. Use **new contributions** to build cash, or sell small amounts of overweight buckets and move to Cash/MM.`,
+      `- Cash/MM is under target → prioritize **new contributions** first; only sell overweights if you must.`,
     );
   } else {
-    lines.push(`- Best approach: use **new contributions** to close gaps (often simpler + more tax-friendly).`);
+    lines.push(`- Best default: use **new money** to close gaps (simpler + often more tax-friendly).`);
   }
-  lines.push("- Equity examples (not recommendations): broad US index, total market, international index.");
-  lines.push("- Bond examples (not recommendations): broad aggregate bond, short/intermediate-term bond funds.");
 
-  lines.push("");
-
-  // Risk notes
-  lines.push("## Risk Notes");
-  if (mix.cash > Math.max(target.cash + 0.1, 0.2)) {
-    lines.push(`- Cash drag: Cash/MM at ${pct(mix.cash)} may reduce long-run growth vs your target.`);
-  }
-  if (mix.equity > Math.min(target.equity + 0.1, 0.9)) {
-    lines.push(`- Volatility: Equity at ${pct(mix.equity)} may increase drawdowns vs your target.`);
-  }
-  lines.push("- Rebalance cadence idea: quarterly or when a bucket drifts ~5–10% from target.");
+  // optional: a tiny “examples” line, without being long
+  lines.push("- Examples (not recommendations): equity index funds, broad bond funds, and money market for cash needs.");
 
   lines.push("");
   lines.push("> Disclaimer: No specific securities are recommended. Educational and informational purposes only.");
@@ -187,7 +193,7 @@ function buildInsightsMarkdown(req: AdvisorRequest): string {
   return lines.join("\n");
 }
 
-/** Compute total portfolio $ and bucket totals */
+/** Compute total portfolio $ and bucket totals (✅ uses valueForPosition) */
 function computeTotals(positions: Position[]) {
   let total = 0;
 
@@ -197,7 +203,7 @@ function computeTotals(positions: Position[]) {
   let other = 0;
 
   for (const p of positions) {
-    const v = (p.currentPrice ?? p.costBasisPerUnit) * p.quantity;
+    const v = valueForPosition(p);
     if (!Number.isFinite(v)) continue;
     total += v;
 
@@ -281,7 +287,7 @@ function buildRebalancePlan(opts: {
     const deficits = [
       { bucket: "Equity", need: Math.max(deltaDollar.equity, 0) },
       { bucket: "Bonds", need: Math.max(deltaDollar.bonds, 0) },
-    ].filter((d) => d.need > 50); // ignore tiny moves
+    ].filter((d) => d.need > 50);
 
     if (deficits.length) {
       let remaining = availableFromCash;
@@ -310,7 +316,7 @@ function buildRebalancePlan(opts: {
 
     if (overweights.length) {
       actions.push(
-        `- 2) You’re under target Cash/MM by **${money(neededCash)}**. Consider directing new contributions to Cash/MM or selling small amounts of overweight buckets:`,
+        `- 2) You’re under target Cash/MM by **${money(neededCash)}**. Prefer new contributions, or sell small amounts of overweights:`,
       );
       for (const o of overweights) {
         actions.push(`  - Sell up to **${money(Math.min(o.excess, neededCash))}** from **${o.bucket}** → **Cash/MM**`);
@@ -322,18 +328,18 @@ function buildRebalancePlan(opts: {
     return { tableRows, actions, primaryFundingSource: "contributions" as const };
   }
 
-  // Default fallback
   actions.push("- 2) Use new contributions to close allocation gaps first; sell only if you must.");
   return { tableRows, actions, primaryFundingSource: "contributions" as const };
 }
 
+/** ✅ uses valueForPosition so Cash/MM + mixed pricing is correct */
 function topHoldings(positions: Position[], n: number) {
   const byTicker = new Map<string, number>();
   let total = 0;
 
   for (const p of positions) {
     const t = (p.ticker || "").toUpperCase();
-    const v = (p.currentPrice ?? p.costBasisPerUnit) * p.quantity;
+    const v = valueForPosition(p);
     if (!t || !Number.isFinite(v)) continue;
     byTicker.set(t, (byTicker.get(t) ?? 0) + v);
     total += v;
@@ -357,12 +363,39 @@ function concentrationWarnings(top: { ticker: string; value: number; weight: num
   if (top1.weight > 0.2) out.push(`Concentration flag: **${top1.ticker}** is ${pct(top1.weight)} (common target < 20%).`);
   if (top3 > 0.6) out.push(`Concentration flag: Top 3 holdings are ${pct(top3)} (common target < 60%).`);
 
-  // softer flag
   if (top1.weight > 0.1 && top1.weight <= 0.2) {
     out.push(`Note: Top holding is ${pct(top1.weight)} — consider keeping single names under 10–20%.`);
   }
 
   return out;
+}
+
+/** Small “advisor-ish” label that feels unique */
+function portfolioLabel(opts: { mix: { equity: number; bonds: number; cash: number }; diversificationScore: number; top1: number }) {
+  const { mix, diversificationScore, top1 } = opts;
+  if (mix.cash >= 0.35) return "Cash-Heavy Builder";
+  if (top1 >= 0.2) return "Concentration Tilt";
+  if (diversificationScore >= 85) return "Balanced Operator";
+  if (mix.equity >= 0.8) return "High-Equity Accelerator";
+  return "Steady Builder";
+}
+
+function driftSummary(
+  mix: { equity: number; bonds: number; cash: number },
+  target: { equity: number; bonds: number; cash: number },
+) {
+  const deltas = [
+    { bucket: "Equity", d: mix.equity - target.equity },
+    { bucket: "Bonds", d: mix.bonds - target.bonds },
+    { bucket: "Cash/MM", d: mix.cash - target.cash },
+  ].sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+
+  const biggest = deltas[0];
+  const sign = biggest.d >= 0 ? "over" : "under";
+  return {
+    bucket: biggest.bucket,
+    summary: `${sign} by ${Math.abs(Math.round(biggest.d * 100))}%`,
+  };
 }
 
 function pct(n: number) {
