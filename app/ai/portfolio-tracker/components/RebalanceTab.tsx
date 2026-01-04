@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { usePortfolioState } from "@/lib/usePortfolioState";
 import { fmtMoney, fmtNumber } from "@/lib/format";
-import type { AssetClass } from "@/lib/types";
+import type { AssetClass, Position } from "@/lib/types";
+import { valueForPosition } from "@/lib/portfolioStorage";
 
 type Mode = "ticker" | "assetClass";
 
@@ -102,6 +103,25 @@ function MarkerRail(props: { current: number; target: number; after: number }) {
   );
 }
 
+function hasFiniteNumber(x: unknown): x is number {
+  return typeof x === "number" && Number.isFinite(x);
+}
+
+/**
+ * For rebalance math:
+ * - Use `valueForPosition` so Cash/MM formats are always valued correctly.
+ * - Keep a "price" purely for converting dollars -> shares (cash-like uses price=1).
+ */
+function priceForShares(p: Position): number | null {
+  const isCashLike = p.assetClass === "Money Market" || p.assetClass === "Cash";
+  if (isCashLike) return 1;
+
+  if (hasFiniteNumber(p.currentPrice) && p.currentPrice > 0) return p.currentPrice;
+  if (hasFiniteNumber(p.costBasisPerUnit) && p.costBasisPerUnit > 0) return p.costBasisPerUnit;
+
+  return null;
+}
+
 export default function RebalanceTab() {
   const { state } = usePortfolioState();
 
@@ -113,16 +133,14 @@ export default function RebalanceTab() {
   const positions: PosLite[] = useMemo(() => {
     return (state.positions || [])
       .map((p) => {
-        const ticker = (p.ticker || "").toUpperCase();
-        const qty = Number(p.quantity) || 0;
-        const price =
-          typeof p.currentPrice === "number" && Number.isFinite(p.currentPrice)
-            ? p.currentPrice
-            : typeof p.costBasisPerUnit === "number" && Number.isFinite(p.costBasisPerUnit)
-              ? p.costBasisPerUnit
-              : null;
+        const ticker = (p.ticker || "").toUpperCase().trim();
+        if (!ticker) return null;
 
-        const value = price ? qty * price : 0;
+        const qty = Number(p.quantity) || 0;
+        const price = priceForShares(p);
+
+        // ✅ Correct value across equities/crypto AND cash/MM formats
+        const value = valueForPosition(p);
 
         return {
           ticker,
@@ -131,9 +149,9 @@ export default function RebalanceTab() {
           qty,
           price,
           value,
-        };
+        } as PosLite;
       })
-      .filter((x) => x.ticker);
+      .filter(Boolean) as PosLite[];
   }, [state.positions]);
 
   const tickers = useMemo(() => positions.map((p) => p.ticker), [positions]);
@@ -250,9 +268,9 @@ export default function RebalanceTab() {
     // allocate each class weight across tickers in that class
     for (const p of positions) {
       const classTotal = valueByClass[p.assetClass] ?? 0;
-      const sameClass = positions.filter((x) => x.assetClass === p.assetClass);
-      const within = classTotal > 0 ? p.value / classTotal : sameClass.length > 0 ? 1 / sameClass.length : 0;
+      const sameClassCount = positions.filter((x) => x.assetClass === p.assetClass).length;
 
+      const within = classTotal > 0 ? p.value / classTotal : sameClassCount > 0 ? 1 / sameClassCount : 0;
       targets[p.ticker] = (targets[p.ticker] ?? 0) + classW[p.assetClass] * within;
     }
 
@@ -272,6 +290,7 @@ export default function RebalanceTab() {
     const targetSum = Object.values(tickerTargets).reduce((a, w) => a + w, 0);
     if (targetSum <= 0 && positions.length) warnings.push("Enter target weights (they will auto-normalize).");
 
+    // NOTE: cash/MM positions now have correct values via valueForPosition()
     const baseRows = positions.map((p) => {
       const currentWeight = curTotal > 0 ? p.value / curTotal : 0;
       const targetWeight = tickerTargets[p.ticker] ?? 0;
@@ -572,7 +591,6 @@ export default function RebalanceTab() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <CardTitle>Targets vs Current vs After (Asset Classes)</CardTitle>
 
-            {/* tiny legend */}
             <div className="flex items-center gap-3 text-xs text-gray-600">
               <div className="flex items-center gap-1">
                 <span className="h-2 w-2 rounded bg-blue-600" />
@@ -616,9 +634,7 @@ export default function RebalanceTab() {
                         <td className="py-2 pr-3 text-gray-700">{pctStr(r.tgtW, 2)}</td>
                         <td className="py-2 pr-3 text-gray-700">{pctStr(r.postW, 2)}</td>
                         <td
-                          className={`py-2 pr-3 font-semibold ${
-                            delta >= 0 ? "text-emerald-600" : "text-red-600"
-                          }`}
+                          className={`py-2 pr-3 font-semibold ${delta >= 0 ? "text-emerald-600" : "text-red-600"}`}
                           title="Positive means still underweight"
                         >
                           {deltaPctStr(delta, 2)}
@@ -688,7 +704,8 @@ export default function RebalanceTab() {
               </table>
 
               <div className="mt-3 text-xs text-gray-500">
-                Shares use <span className="font-medium">currentPrice</span> (fallback: cost basis). This is a what-if tool — no trades are executed.
+                Shares use <span className="font-medium">currentPrice</span> (fallback: cost basis; cash/MM uses $1/share).
+                This is a what-if tool — no trades are executed.
               </div>
             </div>
           )}
