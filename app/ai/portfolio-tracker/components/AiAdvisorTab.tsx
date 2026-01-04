@@ -23,6 +23,27 @@ type MoveItem = {
   detail: string;
 };
 
+function getNumberField(obj: unknown, keys: string[], fallback: number): number {
+  if (!obj || typeof obj !== "object") return fallback;
+  const rec = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const v = rec[k];
+    const n = typeof v === "number" ? v : Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
+function getStringField(obj: unknown, keys: string[], fallback: string): string {
+  if (!obj || typeof obj !== "object") return fallback;
+  const rec = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const v = rec[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return fallback;
+}
+
 export default function AiAdvisorTab() {
   const { state, diversificationScore, diversificationDetails, topConcentrations } = usePortfolioState();
   const [loading, setLoading] = useState(false);
@@ -61,35 +82,32 @@ export default function AiAdvisorTab() {
   const rebalanceLines = useMemo(() => {
     const format = (n: number) => `${Math.round(n * 100)}%`;
     return [
-      `Equity: target ${format(target.equity)} vs current ${format(currentMix.equity)} (${deltaText(currentMix.equity - target.equity)})`,
-      `Bonds: target ${format(target.bonds)} vs current ${format(currentMix.bonds)} (${deltaText(currentMix.bonds - target.bonds)})`,
-      `Cash/MM: target ${format(target.cash)} vs current ${format(currentMix.cash)} (${deltaText(currentMix.cash - target.cash)})`,
+      `Equity: target ${format(target.equity)} vs current ${format(currentMix.equity)} (${deltaText(
+        currentMix.equity - target.equity,
+      )})`,
+      `Bonds: target ${format(target.bonds)} vs current ${format(currentMix.bonds)} (${deltaText(
+        currentMix.bonds - target.bonds,
+      )})`,
+      `Cash/MM: target ${format(target.cash)} vs current ${format(currentMix.cash)} (${deltaText(
+        currentMix.cash - target.cash,
+      )})`,
     ];
   }, [currentMix.equity, currentMix.bonds, currentMix.cash, target.equity, target.bonds, target.cash]);
 
   const canGenerate = !!state.profile && state.positions.length > 0;
 
   /**
-   * Portfolio DNA card:
-   * - Concise, “clever”, high signal
-   * - Must be deterministic (no guessing)
+   * Portfolio DNA:
+   * concise, “clever”, high-signal and deterministic
    */
   const dna = useMemo(() => {
-    const risk = state.profile?.riskLevel ?? 3;
+    const profile = state.profile ?? null;
 
-    // Support either naming (you had both across versions)
-    const horizon =
-      // @ts-expect-error - allow compatibility with older profile shapes
-      (state.profile?.horizonYears as number | undefined) ??
-      // @ts-expect-error - allow compatibility with alternate naming
-      (state.profile?.investmentHorizonYears as number | undefined) ??
-      20;
+    const risk = profile?.riskLevel ?? 3;
 
-    // @ts-expect-error - allow compatibility with alternate naming
-    const goal = (state.profile?.goal as string | undefined) ??
-      // @ts-expect-error - allow compatibility with alternate naming
-      (state.profile?.primaryGoal as string | undefined) ??
-      "Wealth Building";
+    // Type-safe compatibility with different profile shapes
+    const horizon = getNumberField(profile, ["horizonYears", "investmentHorizonYears"], 20);
+    const goal = getStringField(profile, ["goal", "primaryGoal"], "Wealth Building");
 
     const cashPct = currentMix.cash;
 
@@ -97,7 +115,7 @@ export default function AiAdvisorTab() {
     const top1Pct = top1?.percent ?? 0;
     const top3Pct = (topConcentrations ?? []).slice(0, 3).reduce((a, x) => a + (x.percent ?? 0), 0);
 
-    // “portfolio identity” label — concise but feels clever
+    // “portfolio identity” label
     let label = "Balanced Builder";
     let tone: Tone = "neutral";
 
@@ -117,9 +135,9 @@ export default function AiAdvisorTab() {
     const oneLiner =
       totals.total <= 0
         ? "Add positions to generate insights."
-        : `A ${String(goal).toLowerCase()} portfolio with ${pct(cashPct, 0)} in Cash/MM and a ${tier} diversification profile.`;
+        : `A ${goal.toLowerCase()} portfolio with ${pct(cashPct, 0)} in Cash/MM and a ${tier} diversification profile.`;
 
-    // Watchlist bullets
+    // Watchlist
     const watch: WatchItem[] = [];
 
     if (cashPct > 0.35) {
@@ -149,7 +167,6 @@ export default function AiAdvisorTab() {
         detail: `Top holding (${top1?.ticker ?? "—"}) is ${pct(top1Pct, 0)}. Great if intentional; risky if accidental.`,
       });
     } else if (top1Pct > 0.1) {
-      // ✅ FIXED: no weird key, no as-any hack, just a normal object
       watch.push({
         title: "Moderate concentration",
         level: "neutral",
@@ -163,7 +180,7 @@ export default function AiAdvisorTab() {
       });
     }
 
-    // 3 moves (concise, actionable)
+    // 3 moves
     const moves: MoveItem[] = [
       {
         title: "1) Set a cash rule",
@@ -244,7 +261,7 @@ export default function AiAdvisorTab() {
               <span>
                 Risk <span className="font-medium text-gray-900">{dna.risk}/5</span> • Horizon{" "}
                 <span className="font-medium text-gray-900">{dna.horizon}y</span> • Goal{" "}
-                <span className="font-medium text-gray-900">{String(dna.goal)}</span>
+                <span className="font-medium text-gray-900">{dna.goal}</span>
               </span>
               <span className="text-gray-300">•</span>
               <span>
@@ -498,10 +515,6 @@ function MarkdownLite({ text }: { text: string }) {
 }
 
 function MarkdownTable({ lines }: { lines: string[] }) {
-  // Expected:
-  // | A | B |
-  // |---|---|
-  // | ... |
   const cleaned = lines.map((l) => l.trim()).filter(Boolean);
   if (cleaned.length < 2) return null;
 
