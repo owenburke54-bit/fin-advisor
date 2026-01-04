@@ -10,6 +10,19 @@ import { fmtMoney, fmtNumber } from "@/lib/format";
 
 type Mix = { equity: number; bonds: number; cash: number };
 
+type Tone = "good" | "warn" | "neutral";
+
+type WatchItem = {
+  title: string;
+  level: Tone;
+  detail: string;
+};
+
+type MoveItem = {
+  title: string;
+  detail: string;
+};
+
 export default function AiAdvisorTab() {
   const { state, diversificationScore, diversificationDetails, topConcentrations } = usePortfolioState();
   const [loading, setLoading] = useState(false);
@@ -17,7 +30,7 @@ export default function AiAdvisorTab() {
 
   const snapshot = state.snapshots.at(-1) ?? null;
 
-  // ✅ FIX: Use valueForPosition() so Cash/MM valuation matches your storage rules
+  // ✅ Use valueForPosition() so Cash/MM valuation matches your storage rules
   const { currentMix, totals } = useMemo(() => {
     const totals = state.positions.reduce(
       (acc, p) => {
@@ -56,10 +69,27 @@ export default function AiAdvisorTab() {
 
   const canGenerate = !!state.profile && state.positions.length > 0;
 
+  /**
+   * Portfolio DNA card:
+   * - Concise, “clever”, high signal
+   * - Must be deterministic (no guessing)
+   */
   const dna = useMemo(() => {
     const risk = state.profile?.riskLevel ?? 3;
-    const horizon = state.profile?.horizonYears ?? 20;
-    const goal = state.profile?.goal ?? "Wealth Building";
+
+    // Support either naming (you had both across versions)
+    const horizon =
+      // @ts-expect-error - allow compatibility with older profile shapes
+      (state.profile?.horizonYears as number | undefined) ??
+      // @ts-expect-error - allow compatibility with alternate naming
+      (state.profile?.investmentHorizonYears as number | undefined) ??
+      20;
+
+    // @ts-expect-error - allow compatibility with alternate naming
+    const goal = (state.profile?.goal as string | undefined) ??
+      // @ts-expect-error - allow compatibility with alternate naming
+      (state.profile?.primaryGoal as string | undefined) ??
+      "Wealth Building";
 
     const cashPct = currentMix.cash;
 
@@ -69,7 +99,8 @@ export default function AiAdvisorTab() {
 
     // “portfolio identity” label — concise but feels clever
     let label = "Balanced Builder";
-    let tone: "good" | "warn" | "neutral" = "neutral";
+    let tone: Tone = "neutral";
+
     if (cashPct > 0.35) {
       label = "Cash-Heavy Builder";
       tone = "warn";
@@ -81,13 +112,15 @@ export default function AiAdvisorTab() {
       tone = "good";
     }
 
+    const tier = diversificationDetails?.tier?.toLowerCase() ?? "mixed";
+
     const oneLiner =
       totals.total <= 0
         ? "Add positions to generate insights."
-        : `A ${goal.toLowerCase()} portfolio with ${pct(cashPct, 0)} in Cash/MM and a ${diversificationDetails?.tier?.toLowerCase() ?? "mixed"} diversification profile.`;
+        : `A ${String(goal).toLowerCase()} portfolio with ${pct(cashPct, 0)} in Cash/MM and a ${tier} diversification profile.`;
 
-    // watchlist bullets
-    const watch: { title: string; level: "good" | "warn" | "neutral"; detail: string }[] = [];
+    // Watchlist bullets
+    const watch: WatchItem[] = [];
 
     if (cashPct > 0.35) {
       watch.push({
@@ -116,12 +149,12 @@ export default function AiAdvisorTab() {
         detail: `Top holding (${top1?.ticker ?? "—"}) is ${pct(top1Pct, 0)}. Great if intentional; risky if accidental.`,
       });
     } else if (top1Pct > 0.1) {
+      // ✅ FIXED: no weird key, no as-any hack, just a normal object
       watch.push({
         title: "Moderate concentration",
         level: "neutral",
-        detail дру: `Top holding is ${pct(top1Pct, 0)}. Not bad — just keep it intentional.`,
-      } as any);
-      // NOTE: TypeScript-safe below (no "workaround"): we’ll replace this object right after.
+        detail: `Top holding is ${pct(top1Pct, 0)}. Not bad — just keep it intentional.`,
+      });
     } else {
       watch.push({
         title: "Concentration looks healthy",
@@ -130,14 +163,8 @@ export default function AiAdvisorTab() {
       });
     }
 
-    // Fix the accidental key above without risking TS errors
-    if (watch.some((w) => (w as any).detail == null)) {
-      const idx = watch.findIndex((w) => (w as any).detail == null);
-      if (idx >= 0) watch[idx] = { title: "Moderate concentration", level: "neutral", detail: `Top holding is ${pct(top1Pct, 0)}. Not bad — just keep it intentional.` };
-    }
-
-    // 3 moves (concise, actionable, non-salesy)
-    const moves = [
+    // 3 moves (concise, actionable)
+    const moves: MoveItem[] = [
       {
         title: "1) Set a cash rule",
         detail:
@@ -160,9 +187,7 @@ export default function AiAdvisorTab() {
 
     return { risk, horizon, goal, label, tone, oneLiner, top1, top1Pct, top3Pct, watch, moves };
   }, [
-    state.profile?.riskLevel,
-    state.profile?.horizonYears,
-    state.profile?.goal,
+    state.profile,
     currentMix.cash,
     totals.total,
     topConcentrations,
@@ -219,7 +244,7 @@ export default function AiAdvisorTab() {
               <span>
                 Risk <span className="font-medium text-gray-900">{dna.risk}/5</span> • Horizon{" "}
                 <span className="font-medium text-gray-900">{dna.horizon}y</span> • Goal{" "}
-                <span className="font-medium text-gray-900">{dna.goal}</span>
+                <span className="font-medium text-gray-900">{String(dna.goal)}</span>
               </span>
               <span className="text-gray-300">•</span>
               <span>
@@ -315,7 +340,7 @@ export default function AiAdvisorTab() {
         </Card>
       </div>
 
-      {/* QUICK REBALANCE SUMMARY (keep yours, but numbers now align with corrected mix) */}
+      {/* QUICK REBALANCE SUMMARY */}
       <Card>
         <CardHeader>
           <CardTitle>Quick Rebalance Summary</CardTitle>
@@ -337,7 +362,7 @@ export default function AiAdvisorTab() {
 
 /* ---------- small UI helpers ---------- */
 
-function Badge({ text, tone }: { text: string; tone: "good" | "warn" | "neutral" }) {
+function Badge({ text, tone }: { text: string; tone: Tone }) {
   const cls =
     tone === "good"
       ? "bg-emerald-50 text-emerald-700 border-emerald-200"
@@ -376,7 +401,7 @@ function deltaText(delta: number): string {
 }
 
 function pct(n: number, d = 0) {
-  return `${fmtNumber(n * 100, d)}%`;
+  return `${fmtNumber((n || 0) * 100, d)}%`;
 }
 
 /**
@@ -500,7 +525,10 @@ function MarkdownTable({ lines }: { lines: string[] }) {
         <thead className="bg-gray-50">
           <tr>
             {header.map((h, i) => (
-              <th key={i} className={`px-3 py-2 font-semibold text-gray-900 ${i === 0 ? "text-left" : "text-right"}`}>
+              <th
+                key={i}
+                className={`px-3 py-2 font-semibold text-gray-900 ${i === 0 ? "text-left" : "text-right"}`}
+              >
                 {h}
               </th>
             ))}
