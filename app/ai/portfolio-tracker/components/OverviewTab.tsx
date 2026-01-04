@@ -111,13 +111,25 @@ function TimeframePills(props: { value: Timeframe; onChange: (v: Timeframe) => v
 
   return (
     <div className="flex items-center gap-2">
-      <button type="button" className={`${pillBase} ${value === "all" ? active : inactive}`} onClick={() => onChange("all")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "all" ? active : inactive}`}
+        onClick={() => onChange("all")}
+      >
         All
       </button>
-      <button type="button" className={`${pillBase} ${value === "1m" ? active : inactive}`} onClick={() => onChange("1m")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1m" ? active : inactive}`}
+        onClick={() => onChange("1m")}
+      >
         1M
       </button>
-      <button type="button" className={`${pillBase} ${value === "1y" ? active : inactive}`} onClick={() => onChange("1y")}>
+      <button
+        type="button"
+        className={`${pillBase} ${value === "1y" ? active : inactive}`}
+        onClick={() => onChange("1y")}
+      >
         1Y
       </button>
     </div>
@@ -132,7 +144,8 @@ function MetricCard(props: {
 }) {
   const { title, value, footnote, tone = "default" } = props;
 
-  const toneClass = tone === "pos" ? "text-emerald-600" : tone === "neg" ? "text-red-600" : "text-gray-900";
+  const toneClass =
+    tone === "pos" ? "text-emerald-600" : tone === "neg" ? "text-red-600" : "text-gray-900";
 
   return (
     <Card className="h-full">
@@ -140,7 +153,9 @@ function MetricCard(props: {
         <div className="text-sm font-medium text-gray-600">{title}</div>
 
         <div className="mt-4 min-h-[48px] flex items-end">
-          <div className={`text-4xl font-semibold tracking-tight leading-none tabular-nums ${toneClass}`}>{value}</div>
+          <div className={`text-4xl font-semibold tracking-tight leading-none tabular-nums ${toneClass}`}>
+            {value}
+          </div>
         </div>
 
         <div className="flex-1" />
@@ -237,9 +252,9 @@ export default function OverviewTab() {
   const [showBenchmark, setShowBenchmark] = useState(true);
 
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [historySeries, setHistorySeries] = useState<{ date: string; value: number; breakdown?: Record<string, number> }[]>(
-    [],
-  );
+  const [historySeries, setHistorySeries] = useState<
+    { date: string; value: number; breakdown?: Record<string, number> }[]
+  >([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [benchLoading, setBenchLoading] = useState(false);
@@ -376,10 +391,13 @@ export default function OverviewTab() {
       const portfolioPct = chartBaseline > 0 ? Number((((p.value / chartBaseline) - 1) * 100).toFixed(4)) : 0;
 
       const benchClose = typeof lastBenchClose === "number" ? lastBenchClose : undefined;
-      const benchPct = showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
+      const benchPct =
+        showBenchmark && benchClose && benchFirstClose > 0 ? ((benchClose / benchFirstClose) - 1) * 100 : undefined;
 
       const benchDollarIndexed =
-        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0 ? chartBaseline * (benchClose / benchFirstClose) : undefined;
+        showBenchmark && benchClose && benchFirstClose > 0 && chartBaseline > 0
+          ? chartBaseline * (benchClose / benchFirstClose)
+          : undefined;
 
       return {
         d: p.date,
@@ -446,7 +464,9 @@ export default function OverviewTab() {
         : [
             `Latest: Your portfolio ${periodChange >= 0 ? "gained" : "fell"} ${fmtNumber(Math.abs(periodChange), 2)}% (1 day).`,
             `Diversification score: ${diversificationScore}/100.`,
-            ...(typeof twrValue === "number" ? [`True return (TWR)${timeframeLabel}: ${fmtSignedPct(twrValue * 100, 2)}.`] : []),
+            ...(typeof twrValue === "number"
+              ? [`True return (TWR)${timeframeLabel}: ${fmtSignedPct(twrValue * 100, 2)}.`]
+              : []),
           ];
 
     const driver = (() => {
@@ -597,7 +617,11 @@ export default function OverviewTab() {
           footnote={
             <>
               <span className="text-gray-500">Return</span>
-              <span className={`font-medium tabular-nums ${kpis.sinceStartPercent >= 0 ? "text-emerald-700" : "text-red-700"}`}>
+              <span
+                className={`font-medium tabular-nums ${
+                  kpis.sinceStartPercent >= 0 ? "text-emerald-700" : "text-red-700"
+                }`}
+              >
                 {fmtSignedPct(kpis.sinceStartPercent, 2)}
               </span>
             </>
@@ -629,7 +653,9 @@ export default function OverviewTab() {
           tone="default"
           footnote={
             <>
-              <span className="text-gray-500 tabular-nums">DD {typeof kpis.riskMdd === "number" ? `${fmtNumber(kpis.riskMdd * 100, 1)}%` : "—"}</span>
+              <span className="text-gray-500 tabular-nums">
+                DD {typeof kpis.riskMdd === "number" ? `${fmtNumber(kpis.riskMdd * 100, 1)}%` : "—"}
+              </span>
               <span className="font-medium text-gray-700 tabular-nums">
                 β {showBenchmark && typeof kpis.riskBeta === "number" ? fmtNumber(kpis.riskBeta, 2) : "—"}
               </span>
@@ -659,7 +685,11 @@ export default function OverviewTab() {
               <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-medium text-gray-500">Net contributions</div>
-                  <div className={`mt-1 text-xl font-semibold tabular-nums ${contribIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                  <div
+                    className={`mt-1 text-xl font-semibold tabular-nums ${
+                      contribIsPos ? "text-emerald-700" : "text-red-700"
+                    }`}
+                  >
                     {kpis.netContrib >= 0 ? "+" : ""}
                     {fmtMoney(kpis.netContrib ?? 0)}
                   </div>
@@ -667,7 +697,11 @@ export default function OverviewTab() {
 
                 <div className="rounded-xl border bg-white p-4">
                   <div className="text-xs font-medium text-gray-500">Market growth</div>
-                  <div className={`mt-1 text-xl font-semibold tabular-nums ${growthIsPos ? "text-emerald-700" : "text-red-700"}`}>
+                  <div
+                    className={`mt-1 text-xl font-semibold tabular-nums ${
+                      growthIsPos ? "text-emerald-700" : "text-red-700"
+                    }`}
+                  >
                     {kpis.tfMarketGrowth >= 0 ? "+" : ""}
                     {fmtMoney(kpis.tfMarketGrowth ?? 0)}
                   </div>
@@ -692,11 +726,19 @@ export default function OverviewTab() {
 
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block h-2 w-2 rounded-full ${contribIsPos ? "bg-emerald-500" : "bg-red-500"}`} />
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${
+                        contribIsPos ? "bg-emerald-500" : "bg-red-500"
+                      }`}
+                    />
                     <span className="tabular-nums">Contrib ({fmtNumber(contribPct, 0)}%)</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={`inline-block h-2 w-2 rounded-full ${growthIsPos ? "bg-slate-800" : "bg-red-700"}`} />
+                    <span
+                      className={`inline-block h-2 w-2 rounded-full ${
+                        growthIsPos ? "bg-slate-800" : "bg-red-700"
+                      }`}
+                    />
                     <span className="tabular-nums">Growth ({fmtNumber(growthPct, 0)}%)</span>
                   </div>
                 </div>
@@ -721,7 +763,12 @@ export default function OverviewTab() {
           <TimeframePills value={timeframe} onChange={setTimeframe} />
 
           <label className="flex items-center gap-2 rounded-full border bg-white px-3 py-2 text-sm text-gray-700 select-none">
-            <input type="checkbox" className="h-4 w-4" checked={showBenchmark} onChange={(e) => setShowBenchmark(e.target.checked)} />
+            <input
+              type="checkbox"
+              className="h-4 w-4"
+              checked={showBenchmark}
+              onChange={(e) => setShowBenchmark(e.target.checked)}
+            />
             <span className="font-medium">S&amp;P 500</span>
           </label>
         </div>
@@ -752,7 +799,8 @@ export default function OverviewTab() {
           ) : (
             <>
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData} margin={{ top: 10, right: 14, left: 6, bottom: 8 }}>
+                {/* ✅ Increased TOP margin so legend sits above y-axis labels cleanly */}
+                <LineChart data={chartData} margin={{ top: 24, right: 14, left: 6, bottom: 8 }}>
                   <CartesianGrid vertical={false} strokeDasharray="3 3" opacity={0.25} />
                   <XAxis
                     dataKey="d"
@@ -772,14 +820,15 @@ export default function OverviewTab() {
                     tickMargin={6}
                   />
 
-                  {/* Legend INSIDE the chart so it’s fully visible and “on-chart” */}
+                  {/* ✅ Lift legend a bit so it doesn’t touch the axis / top gridline */}
                   <Legend
                     verticalAlign="top"
                     align="left"
                     iconType="plainline"
                     wrapperStyle={{
                       paddingLeft: 6,
-                      paddingTop: 2,
+                      paddingTop: 0,
+                      marginTop: -10, // <-- key: move legend up
                       fontSize: 12,
                     }}
                   />
@@ -817,7 +866,9 @@ export default function OverviewTab() {
                               <div className="flex justify-between gap-6">
                                 <span className="text-gray-600">S&amp;P 500 (SPY)</span>
                                 <span className="font-semibold tabular-nums">
-                                  {mode === "dollar" ? fmtMoney(point.benchDollar ?? 0) : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
+                                  {mode === "dollar"
+                                    ? fmtMoney(point.benchDollar ?? 0)
+                                    : `${fmtNumber(point.benchPct ?? 0, 2)}%`}
                                 </span>
                               </div>
                             )}
@@ -844,7 +895,6 @@ export default function OverviewTab() {
                     }}
                   />
 
-                  {/* Portfolio = solid blue, Benchmark = dashed dark */}
                   <Line
                     type="monotone"
                     dataKey="v"
@@ -885,12 +935,16 @@ export default function OverviewTab() {
 
           {driver ? (
             <div className="mt-2 text-sm text-gray-900">
-              <span className="font-semibold">{driver.ticker}</span> is contributing the largest share of your {driver.dir} right now{" "}
+              <span className="font-semibold">{driver.ticker}</span> is contributing the largest share of your{" "}
+              {driver.dir} right now{" "}
               <span className={driver.pnl >= 0 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
                 ({driver.pnl >= 0 ? "+" : ""}
                 {fmtMoney(driver.pnl)})
               </span>
-              . <span className="text-gray-600">If you want to reduce volatility, lower single-name concentration over time.</span>
+              .{" "}
+              <span className="text-gray-600">
+                If you want to reduce volatility, lower single-name concentration over time.
+              </span>
             </div>
           ) : (
             <div className="mt-2 text-sm text-gray-600">Add positions to see your primary return driver.</div>
