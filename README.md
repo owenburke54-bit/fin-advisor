@@ -1,2 +1,2 @@
 # fin-advisor
-financial advisor llm
+AI Financial Advisor
