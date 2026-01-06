@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { z } from "zod";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/Card";
@@ -33,23 +33,43 @@ function clampRisk(n: number): RiskNumber {
   return v as RiskNumber;
 }
 
+const DEFAULT_PROFILE: UserProfile = {
+  name: "",
+  age: 30,
+  riskLevel: 3 as UserProfile["riskLevel"],
+  investmentHorizonYears: 20,
+  portfolioStartDate: undefined,
+  primaryGoal: "Wealth Building",
+  goalDescription: "",
+  monthlyContribution: 0,
+};
+
 export default function ProfileCard() {
   const { state, setProfile } = usePortfolioState();
 
-  // Keep existing defaults, but ensure riskLevel is valid
-  const existing = state.profile ?? {
-    name: "",
-    age: 30,
-    riskLevel: 3 as UserProfile["riskLevel"],
-    investmentHorizonYears: 20,
-    portfolioStartDate: undefined,
-    primaryGoal: "Wealth Building" as const,
-    goalDescription: "",
-    monthlyContribution: 0,
-  };
+  // "source of truth" profile coming from persisted state (or defaults)
+  const existing = useMemo<UserProfile>(() => {
+    return state.profile ?? DEFAULT_PROFILE;
+  }, [state.profile]);
 
+  // Local draft form state
   const [form, setForm] = useState<UserProfile>(existing);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [dirty, setDirty] = useState(false);
+
+  // ✅ Re-hydrate form after localStorage state loads.
+  // Guard with "dirty" so we don't clobber edits-in-progress.
+  useEffect(() => {
+    if (dirty) return;
+    setForm(existing);
+    // clear any stale errors when we hydrate
+    setErrors({});
+  }, [existing, dirty]);
+
+  function updateForm(next: UserProfile) {
+    setDirty(true);
+    setForm(next);
+  }
 
   function handleSave() {
     const parsed = profileSchema.safeParse({
@@ -57,7 +77,10 @@ export default function ProfileCard() {
       age: Number(form.age),
       riskLevel: clampRisk(Number(form.riskLevel)),
       investmentHorizonYears: Number(form.investmentHorizonYears),
-      monthlyContribution: form.monthlyContribution ? Number(form.monthlyContribution) : undefined,
+      monthlyContribution:
+        form.monthlyContribution === undefined || form.monthlyContribution === null
+          ? undefined
+          : Number(form.monthlyContribution),
     });
 
     if (!parsed.success) {
@@ -72,11 +95,15 @@ export default function ProfileCard() {
 
     setErrors({});
 
-    // Cast only the riskLevel field into UserProfile["riskLevel"] to satisfy your types
-    setProfile({
+    const nextProfile: UserProfile = {
       ...(parsed.data as Omit<UserProfile, "riskLevel">),
       riskLevel: parsed.data.riskLevel as UserProfile["riskLevel"],
-    } as UserProfile);
+    } as UserProfile;
+
+    setProfile(nextProfile);
+
+    // once saved, we can treat local draft as "clean"
+    setDirty(false);
   }
 
   const riskLabels = ["Very Conservative", "Conservative", "Moderate", "Aggressive", "Very Aggressive"] as const;
@@ -103,12 +130,19 @@ export default function ProfileCard() {
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm mb-1">Name</label>
-            <Input value={form.name ?? ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            <Input
+              value={form.name ?? ""}
+              onChange={(e) => updateForm({ ...form, name: e.target.value })}
+            />
           </div>
 
           <div>
             <label className="block text-sm mb-1">Age</label>
-            <Input type="number" value={form.age} onChange={(e) => setForm({ ...form, age: Number(e.target.value) })} />
+            <Input
+              type="number"
+              value={form.age}
+              onChange={(e) => updateForm({ ...form, age: Number(e.target.value) })}
+            />
             {errors.age && <p className="text-xs text-red-600 mt-1">{errors.age}</p>}
           </div>
 
@@ -119,7 +153,12 @@ export default function ProfileCard() {
               max={5}
               step={1}
               value={Number(form.riskLevel)}
-              onChange={(e) => setForm({ ...form, riskLevel: clampRisk(Number(e.target.value)) as UserProfile["riskLevel"] })}
+              onChange={(e) =>
+                updateForm({
+                  ...form,
+                  riskLevel: clampRisk(Number((e as any).target?.value ?? e)) as UserProfile["riskLevel"],
+                })
+              }
             />
           </div>
 
@@ -128,7 +167,7 @@ export default function ProfileCard() {
             <Input
               type="number"
               value={form.investmentHorizonYears}
-              onChange={(e) => setForm({ ...form, investmentHorizonYears: Number(e.target.value) })}
+              onChange={(e) => updateForm({ ...form, investmentHorizonYears: Number(e.target.value) })}
             />
           </div>
 
@@ -138,7 +177,7 @@ export default function ProfileCard() {
               type="date"
               value={form.portfolioStartDate ?? ""}
               onChange={(e) =>
-                setForm({
+                updateForm({
                   ...form,
                   portfolioStartDate: e.target.value || undefined,
                 })
@@ -148,7 +187,12 @@ export default function ProfileCard() {
 
           <div>
             <label className="block text-sm mb-1">Primary goal</label>
-            <Select value={form.primaryGoal} onChange={(e) => setForm({ ...form, primaryGoal: e.target.value as UserProfile["primaryGoal"] })}>
+            <Select
+              value={form.primaryGoal}
+              onChange={(e) =>
+                updateForm({ ...form, primaryGoal: e.target.value as UserProfile["primaryGoal"] })
+              }
+            >
               {["Retirement", "House", "Wealth Building", "Education", "Short-Term Savings", "Other"].map((g) => (
                 <option key={g} value={g}>
                   {g}
@@ -163,7 +207,7 @@ export default function ProfileCard() {
               type="number"
               value={form.monthlyContribution ?? 0}
               onChange={(e) =>
-                setForm({
+                updateForm({
                   ...form,
                   monthlyContribution: Number(e.target.value),
                 })
@@ -173,7 +217,10 @@ export default function ProfileCard() {
 
           <div className="sm:col-span-2">
             <label className="block text-sm mb-1">Goal description (optional)</label>
-            <Input value={form.goalDescription ?? ""} onChange={(e) => setForm({ ...form, goalDescription: e.target.value })} />
+            <Input
+              value={form.goalDescription ?? ""}
+              onChange={(e) => updateForm({ ...form, goalDescription: e.target.value })}
+            />
           </div>
         </div>
 
